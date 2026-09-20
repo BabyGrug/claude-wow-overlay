@@ -46,7 +46,7 @@ WINDOW_W, WINDOW_H = 560, 460
 
 # Bump alongside overlay.py's APP_VERSION -- shown in Windows' "Apps &
 # Features" listing via the registry uninstall entry (see register_uninstaller).
-INSTALLER_VERSION = "1.1.0"
+INSTALLER_VERSION = "1.1.1"
 
 UNINSTALL_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWowOverlay"
 

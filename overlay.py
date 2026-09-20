@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 def _icon_path():
@@ -180,17 +180,11 @@ DEFAULT_SETTINGS = {
     "seen_first_run_tips": False,
 }
 
-# (value, label) -- label is what the Settings dialog shows; value is what
-# gets passed to claude.exe's --model/--effort flags. "sonnet"/"opus"/"fable"
-# are the actual valid --model aliases the CLI accepts (confirmed via its own
-# --help text); effort choices are a curated subset of the 5 the CLI supports
-# (low/medium/high/xhigh/max) -- xhigh/max omitted from the UI as overkill
-# for this app and a surprise-cost risk for casual users.
-MODEL_CHOICES = [
-    ("sonnet", "Sonnet -- balanced (recommended)"),
-    ("opus", "Opus -- most capable, slower & pricier"),
-    ("fable", "Fable -- fastest, least capable"),
-]
+# Model is fixed to Sonnet -- not user-selectable. (value, label) -- label is
+# what the Settings dialog shows; value is what gets passed to claude.exe's
+# --effort flag. Effort choices are a curated subset of the 5 the CLI
+# supports (low/medium/high/xhigh/max) -- xhigh/max omitted from the UI as
+# overkill for this app and a surprise-cost risk for casual users.
 EFFORT_CHOICES = [
     ("low", "Low -- fastest, cheapest"),
     ("medium", "Medium -- balanced (recommended)"),
@@ -206,6 +200,10 @@ def load_settings() -> dict:
                 settings.update(json.load(f))
         except Exception:
             pass
+    # Model is no longer user-selectable -- always Sonnet, even overriding
+    # whatever an older version of the Settings dialog may have saved for an
+    # install that previously had Opus or Fable picked.
+    settings["model"] = "sonnet"
     return settings
 
 
@@ -1152,8 +1150,14 @@ class ClaudeOverlay:
         win = tk.Toplevel(self.root, bg=bg)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
+        # Stay hidden/unsized until content is built, then size to what it
+        # actually needs (see the identical fix in _show_first_run_tips) --
+        # a hardcoded guess here previously left slack space once the Model
+        # section was removed, and would silently clip content the other
+        # way if a section were ever added back.
+        win.withdraw()
         mx, my = self.root.winfo_x(), self.root.winfo_y()
-        win.geometry(f"340x460+{mx + 40}+{my + 20}")
+        w = 340
         self._settings_win = win
 
         outer = tk.Frame(win, bg=accent)
@@ -1195,7 +1199,6 @@ class ClaudeOverlay:
         content = tk.Frame(card, bg=bg)
         content.pack(fill="both", expand=True, padx=16, pady=12)
 
-        model_var = tk.StringVar(value=self.settings["model"])
         effort_var = tk.StringVar(value=self.settings["effort"])
 
         def build_choice_group(parent, title, choices, var):
@@ -1227,7 +1230,6 @@ class ClaudeOverlay:
                     w.bind("<Button-1>", lambda e, v=value: select(v))
             select(var.get())
 
-        build_choice_group(content, "Model", MODEL_CHOICES, model_var)
         build_choice_group(content, "Effort", EFFORT_CHOICES, effort_var)
 
         tk.Label(
@@ -1274,7 +1276,6 @@ class ClaudeOverlay:
                 new_hotkey != self.settings["hotkey"]
                 or new_screenshot_hotkey != self.settings["screenshot_hotkey"]
             )
-            self.settings["model"] = model_var.get()
             self.settings["effort"] = effort_var.get()
             self.settings["hotkey"] = new_hotkey
             self.settings["screenshot_hotkey"] = new_screenshot_hotkey
@@ -1298,6 +1299,11 @@ class ClaudeOverlay:
         )
         save_btn.pack(side="right")
         save_btn.bind("<Button-1>", lambda e: do_save())
+
+        win.update_idletasks()
+        h = outer.winfo_reqheight()
+        win.geometry(f"{w}x{h}+{mx + 40}+{my + 20}")
+        win.deiconify()
 
     # ---------- first-run tips ----------
 

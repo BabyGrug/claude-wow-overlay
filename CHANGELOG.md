@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.1
+- Removed the Opus/Fable model options from Settings -- Claude model is now
+  fixed to Sonnet (existing installs that had Opus or Fable selected are
+  reset to Sonnet automatically). You can still choose an effort level.
+
 ## v1.1.0
 - Settings panel (⚙ gear icon): choose the Claude model (Sonnet/Opus/Fable)
   and effort level (Low/Medium/High), with Sonnet + Medium recommended by
