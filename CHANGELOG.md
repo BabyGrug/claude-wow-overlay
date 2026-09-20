@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.4
+- The ⚙ and ⓘ title bar icons now toggle -- click again to close, same as
+  the Settings dialog's X or the tips dialog's "Got it" button.
+- Added a tip explaining the "⟲ New" button (starts a fresh conversation).
+
 ## v1.1.3
 - Added a "ⓘ" info button next to the gear icon in the title bar --
   reopens the first-run tips list anytime, not just automatically on first

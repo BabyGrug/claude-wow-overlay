@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 
 
 def _icon_path():
@@ -1156,11 +1156,15 @@ class ClaudeOverlay:
 
     def _open_settings_dialog(self):
         if getattr(self, "_settings_win", None) is not None:
+            # Clicking the gear again while it's already open closes it --
+            # same effect as the dialog's own X -- rather than just
+            # re-focusing it, so the titlebar icon acts as a toggle.
             try:
-                self._settings_win.lift()
-                return
+                self._settings_win.destroy()
             except Exception:
                 pass
+            self._settings_win = None
+            return
 
         bg, bg_dark, fg, accent = "#1e1e24", "#141419", "#e8e8ec", "#7c5cff"
 
@@ -1340,11 +1344,17 @@ class ClaudeOverlay:
 
     def _show_first_run_tips(self):
         if getattr(self, "_tips_win", None) is not None:
+            # Clicking the info icon again while it's already open closes it
+            # -- same effect as "Got it" -- rather than just re-focusing it,
+            # so the titlebar icon acts as a toggle.
             try:
-                self._tips_win.lift()
-                return
+                self._tips_win.destroy()
             except Exception:
                 pass
+            self._tips_win = None
+            self.settings["seen_first_run_tips"] = True
+            save_settings(self.settings)
+            return
 
         bg, bg_dark, fg, accent = "#1e1e24", "#141419", "#e8e8ec", "#7c5cff"
 
@@ -1389,13 +1399,17 @@ class ClaudeOverlay:
             ("\U0001F4CD button", "Appears when Claude gives you a specific map "
              "location -- click it, then paste in WoW chat to drop a waypoint."),
             ("⚙ gear icon", "Change the model, effort level, or either "
-             "hotkey, next to \"Claude\" in the title bar."),
+             "hotkey, next to \"Claude\" in the title bar. Click it again "
+             "to close Settings, same as its X."),
+            ("⟲ New", "Starts a fresh conversation -- Claude forgets "
+             "everything asked so far in this session."),
             ("Tray icon", "Claude keeps running in the system tray when "
              "hidden -- right-click it for Show/Hide, New, Settings, or Quit."),
             ("✕ vs Quit", "✕ just hides the box (same as the hotkey). "
              "\"Quit\" next to the title actually exits."),
             ("ⓘ button", "Come back to this list anytime -- it's next "
-             "to the gear icon in the title bar."),
+             "to the gear icon in the title bar. Click it again to close, "
+             "same as \"Got it\" below."),
         ]
         for label, desc in tips:
             row = tk.Frame(content, bg=bg)
