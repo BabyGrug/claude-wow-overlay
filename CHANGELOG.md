@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.2
+- Added a Stop button (the "Ask" button turns into "Stop" while a question
+  is in flight) to cancel an accidental or unwanted query instead of having
+  to wait it out.
+- Fixed the update button showing a doubled "v" (e.g. "vv1.1.1") -- was
+  always cosmetic, never affected which file got downloaded.
+- The update download now shows real progress (percentage, or MB if the
+  server doesn't report a size) instead of a static "Downloading..." with
+  no feedback.
+- Settings shows "Model: Sonnet" as plain info text (it's fixed, not a
+  choice -- see v1.1.1) so it's still clear which model your effort level
+  is trading off against.
+- A one-time toast on startup confirms the app is running in the system
+  tray, since Windows hides newly-added tray icons in the overflow area by
+  default and the icon alone isn't a reliable sign it started.
+
 ## v1.1.1
 - Removed the Opus/Fable model options from Settings -- Claude model is now
   fixed to Sonnet (existing installs that had Opus or Fable selected are

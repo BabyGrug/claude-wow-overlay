@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 
 def _icon_path():
@@ -246,7 +246,11 @@ def check_for_update():
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
-        latest = (data.get("tag_name") or "").strip()
+        # GitHub tag names are "vX.Y.Z" -- strip the "v" here so every
+        # downstream consumer (the "Update to vX" button text, etc.) gets a
+        # bare version number and adds its own single "v" prefix, rather than
+        # each caller having to remember whether this string already has one.
+        latest = (data.get("tag_name") or "").strip().lstrip("vV")
         if not latest or _version_tuple(latest) <= _version_tuple(APP_VERSION):
             return None, None
         download_url = None
@@ -826,6 +830,8 @@ class ClaudeOverlay:
         self.session_id = None
         self.busy = False
         self._streaming = False
+        self._current_proc = None
+        self._stopped_by_user = False
         self.ui_queue = queue.Queue()
 
         try:
@@ -1059,7 +1065,7 @@ class ClaudeOverlay:
             font=("Segoe UI", 9, "bold"), padx=12, cursor="hand2",
         )
         send_btn.grid(row=0, column=2, ipady=6)
-        send_btn.bind("<Button-1>", lambda e: self.send())
+        send_btn.bind("<Button-1>", lambda e: self._on_ask_or_stop())
         self.send_btn = send_btn
 
         # --- resize grip (bottom-right corner) ---
@@ -1200,6 +1206,20 @@ class ClaudeOverlay:
         content.pack(fill="both", expand=True, padx=16, pady=12)
 
         effort_var = tk.StringVar(value=self.settings["effort"])
+
+        # Not a selector (see v1.1.1 -- Opus/Fable removed) but still shown:
+        # which model is in use matters for understanding token cost, same
+        # reason the effort choices below spell out cheap/pricier.
+        model_row = tk.Frame(content, bg=bg)
+        model_row.pack(fill="x", pady=(4, 0))
+        tk.Label(
+            model_row, text="Model", bg=bg, fg=fg,
+            font=("Segoe UI", 10, "bold"), anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            model_row, text="Sonnet", bg=bg, fg="#9a9aa2",
+            font=("Segoe UI", 9), anchor="e",
+        ).pack(side="right")
 
         def build_choice_group(parent, title, choices, var):
             tk.Label(
@@ -1421,10 +1441,21 @@ class ClaudeOverlay:
             return
         self._update_available = False
         self.update_btn.unbind("<Button-1>")
-        self.update_btn.config(text="Downloading update...", cursor="", fg="#4caf50")
+        self.update_btn.config(text="Downloading update... 0%", cursor="", fg="#4caf50")
         threading.Thread(
             target=self._download_and_install_update, args=(latest, download_url), daemon=True,
         ).start()
+
+    def _show_update_progress(self, payload):
+        total, expected = payload
+        if expected:
+            pct = min(100, int(total * 100 / expected))
+            text = f"Downloading update... {pct}%"
+        else:
+            # Content-Length wasn't sent for some reason -- show raw progress
+            # instead of a percentage of an unknown total.
+            text = f"Downloading update... {total / (1024 * 1024):.1f} MB"
+        self.update_btn.config(text=text)
 
     def _download_and_install_update(self, latest, download_url):
         installer_path = os.path.join(os.environ.get("TEMP", "."), UPDATE_ASSET_NAME)
@@ -1446,6 +1477,7 @@ class ClaudeOverlay:
                     expected = resp.getheader("Content-Length")
                     expected = int(expected) if expected else None
                     total = 0
+                    last_progress_ts = 0.0
                     with open(installer_path, "wb") as f:
                         while True:
                             chunk = resp.read(65536)
@@ -1453,6 +1485,14 @@ class ClaudeOverlay:
                                 break
                             f.write(chunk)
                             total += len(chunk)
+                            # Time-throttled, not per-chunk -- a ~28MB file is
+                            # hundreds of 64KB chunks, too many UI events to
+                            # push (and redraw) for every single one.
+                            now = time.monotonic()
+                            if now - last_progress_ts >= 0.15:
+                                last_progress_ts = now
+                                self.ui_queue.put(("update_progress", (total, expected)))
+                    self.ui_queue.put(("update_progress", (total, expected)))
                     if expected is not None and total != expected:
                         raise IOError(f"incomplete download: got {total} of {expected} bytes")
                 last_error = None
@@ -1495,6 +1535,8 @@ class ClaudeOverlay:
                     self.ask_about_screen()
                 elif action == "update_available":
                     self._show_update_button(payload)
+                elif action == "update_progress":
+                    self._show_update_progress(payload)
                 elif action == "quit":
                     self.quit()
                 elif action == "answer":
@@ -1608,9 +1650,27 @@ class ClaudeOverlay:
         self.tray_icon = pystray.Icon("ClaudeWowOverlay", image, "Claude WoW Overlay", menu)
         try:
             self.tray_icon.run_detached()
+            # Windows hides newly-added tray icons in the overflow ("^")
+            # area by default, same as any other app -- so the icon alone
+            # isn't a reliable "yes, it's running" signal on first launch.
+            # A toast is a second, separate confirmation that doesn't depend
+            # on the icon being visible. Delayed briefly since run_detached()
+            # returns as soon as its thread *starts*, not once the native
+            # tray window actually exists yet.
+            self.root.after(1500, self._notify_tray_ready)
         except Exception as exc:
             self._append_answer(f"[tray icon failed to start] {exc}", tag="error")
             self.tray_icon = None
+
+    def _notify_tray_ready(self):
+        try:
+            self.tray_icon.notify(
+                "Running in the background. If you don't see the icon, "
+                "check the ˄ arrow near the clock.",
+                "Claude WoW Overlay is ready",
+            )
+        except Exception:
+            pass
 
     def _notify_if_hidden(self):
         """Best-effort badge that an answer is ready -- only worth a toast if
@@ -1724,9 +1784,31 @@ class ClaudeOverlay:
         self.busy = busy
         state = "disabled" if busy else "normal"
         self.input_entry.config(state=state)
-        self.send_btn.config(bg="#4a4a55" if busy else "#7c5cff")
-        if not busy:
+        if busy:
+            self.send_btn.config(text="Stop", bg="#ff6b6b")
+        else:
+            self.send_btn.config(text="Ask", bg="#7c5cff")
+            self._current_proc = None
             self.status_var.set("Ready")
+
+    def _on_ask_or_stop(self):
+        if self.busy:
+            self.stop_query()
+        else:
+            self.send()
+
+    def stop_query(self):
+        """Kills the in-flight claude.exe call, if any -- lets an accidental
+        or unwanted question be aborted instead of having to wait it out."""
+        if not self.busy:
+            return
+        self._stopped_by_user = True
+        if self._current_proc is not None:
+            try:
+                self._current_proc.terminate()
+            except Exception:
+                pass
+        self.status_var.set("Stopping...")
 
     def send(self):
         if self.busy:
@@ -1886,6 +1968,7 @@ class ClaudeOverlay:
 
         label = f"You: {question}" + (" \U0001F4F7" if screenshot_path else "")
         self._append_answer(label)
+        self._stopped_by_user = False
         self._set_busy(True)
         self.status_var.set("Thinking...")
 
@@ -1906,6 +1989,9 @@ class ClaudeOverlay:
                     "error",
                 ),
             ))
+            self.ui_queue.put(("done", None))
+            return
+        if self._stopped_by_user:
             self.ui_queue.put(("done", None))
             return
 
@@ -1958,6 +2044,13 @@ class ClaudeOverlay:
             self.ui_queue.put(("answer", (f"Claude: [failed to run claude.exe: {exc}]", "error")))
             self.ui_queue.put(("done", None))
             return
+
+        self._current_proc = proc
+        if self._stopped_by_user:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
         answer_started = False
         final_event = None
@@ -2020,6 +2113,17 @@ class ClaudeOverlay:
                 stderr_text = proc.stderr.read().strip()
         except Exception:
             pass
+
+        self._current_proc = None
+
+        if self._stopped_by_user:
+            # A deliberate cancel, not a failure -- no alarming [error] text.
+            if answer_started:
+                self.ui_queue.put(("answer_chunk", "\n\n[stopped]"))
+            else:
+                self.ui_queue.put(("answer", ("Claude: [stopped]", None)))
+            self.ui_queue.put(("done", None))
+            return
 
         if final_event is None or final_event.get("is_error"):
             msg = (
