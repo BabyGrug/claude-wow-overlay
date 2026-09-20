@@ -97,7 +97,7 @@ WINDOW_W, WINDOW_H = 460, 360
 MODEL = "sonnet"
 EFFORT = "medium"
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 UPDATE_REPO = "BabyGrug/claude-wow-overlay"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ClaudeWowOverlaySetup.exe"
@@ -912,16 +912,55 @@ class ClaudeOverlay:
         threading.Thread(target=self._download_and_install_update, args=(download_url,), daemon=True).start()
 
     def _download_and_install_update(self, download_url):
+        installer_path = os.path.join(os.environ.get("TEMP", "."), UPDATE_ASSET_NAME)
+        max_attempts = 6
+        last_error = None
+        # The GitHub-release CDN this redirects to has turned out to be
+        # genuinely flaky for a ~28MB file -- confirmed by testing directly:
+        # 3 different attempts each truncated at a DIFFERENT byte count
+        # (4.1MB, 1.7MB, 25.5MB) before a 4th finally came through complete.
+        # A single .read() masks this as one opaque IncompleteRead; reading
+        # in chunks and explicitly checking the total against Content-Length
+        # is what actually catches every truncation (a plain "empty chunk"
+        # EOF check alone would silently accept a truncated file as done,
+        # which is worse than an error -- also confirmed the hard way).
+        for attempt in range(max_attempts):
+            try:
+                req = urllib.request.Request(download_url, headers={"User-Agent": "ClaudeWowOverlay"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    expected = resp.getheader("Content-Length")
+                    expected = int(expected) if expected else None
+                    total = 0
+                    with open(installer_path, "wb") as f:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            total += len(chunk)
+                    if expected is not None and total != expected:
+                        raise IOError(f"incomplete download: got {total} of {expected} bytes")
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                self.ui_queue.put((
+                    "status",
+                    f"Download attempt {attempt + 1}/{max_attempts} incomplete, retrying...",
+                ))
+                time.sleep(2)
+
+        if last_error:
+            self.ui_queue.put((
+                "answer",
+                (f"Claude: [update failed after {max_attempts} attempts] {last_error}", "error"),
+            ))
+            self.ui_queue.put(("done", None))
+            return
         try:
-            installer_path = os.path.join(
-                os.environ.get("TEMP", "."), UPDATE_ASSET_NAME
-            )
-            req = urllib.request.Request(download_url, headers={"User-Agent": "ClaudeWowOverlay"})
-            with urllib.request.urlopen(req, timeout=120) as resp, open(installer_path, "wb") as f:
-                f.write(resp.read())
             subprocess.Popen([installer_path])
         except Exception as exc:
-            self.ui_queue.put(("answer", (f"Claude: [update failed] {exc}", "error")))
+            self.ui_queue.put(("answer", (f"Claude: [update downloaded but failed to launch] {exc}", "error")))
             self.ui_queue.put(("done", None))
             return
         self.ui_queue.put(("quit", None))
