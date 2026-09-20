@@ -1,0 +1,8 @@
+## Interface: 16000, 16001, 11508, 11509
+## Title: Claude Context
+## Notes: Writes your character, location and quest log to disk so the Claude overlay app can use it as context. No network access, no automation -- just a SavedVariables dump.
+## Author: You
+## Version: 1.0.0
+## SavedVariablesPerCharacter: ClaudeContextDB
+
+ClaudeContext.lua
