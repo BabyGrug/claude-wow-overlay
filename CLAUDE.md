@@ -18,6 +18,13 @@ appears anywhere -- see **Privacy** below).
 - `installer.py` -- a Tkinter setup wizard that bundles the compiled
   overlay exe + WoW addon files as payload, walks a non-technical user
   through prerequisites, login, and installation. Also compiled standalone.
+  Same exe, three modes selected by argv: no flag -> the full wizard
+  (first install); `--uninstall` -> `UninstallApp` (this is what the
+  registry's "Apps & Features" entry points at); `--update` ->
+  `run_quiet_update()`, used by the overlay's own in-app updater for a
+  routine version bump -- re-checks prerequisites and re-copies files
+  silently with no UI, only falling back to the full wizard if a check
+  actually fails.
 - `payload/` -- what `installer.py` bundles: the compiled
   `ClaudeWowOverlay.exe` (gitignored, rebuilt every release), `icon.ico`,
   and `ClaudeContext/` (the WoW addon source, tracked in git).
@@ -30,10 +37,12 @@ appears anywhere -- see **Privacy** below).
 Every question shells out to the **local `claude.exe` CLI** (the same one
 bundled with the Claude desktop app) via `-p`/`--print` headless mode, using
 the user's own OAuth login -- this is *why* nothing ever routes through
-anyone else. Sonnet 5, effort=medium, `--restricted
---allowedTools WebSearch,Read` (Read only added when a screenshot's
-involved, plus `--add-dir` to the screenshots folder), streamed via
-`--output-format stream-json --include-partial-messages`.
+anyone else. Model is fixed to Sonnet (Opus/Fable were removed from Settings
+in v1.1.1 -- felt like it invited picking a pricier option by accident);
+effort is user-configurable (Low/Medium/High, Medium recommended) via the
+gear icon. `--restricted --allowedTools WebSearch,Read` (Read only added
+when a screenshot's involved, plus `--add-dir` to the screenshots folder),
+streamed via `--output-format stream-json --include-partial-messages`.
 
 Two hidden tags the model can emit at the end of an answer, stripped from
 the visible text and turned into UI:
@@ -124,7 +133,14 @@ the visible text and turned into UI:
     *without* an exception (silently truncating the file). The real fix
     (`_download_and_install_update`): read in chunks AND verify the total
     against the `Content-Length` header, retrying (currently 6x) until
-    genuinely byte-for-byte complete.
+    genuinely byte-for-byte complete. **Also confirmed directly (curl with a
+    `Range` header): this CDN honors real HTTP Range requests (`206 Partial
+    Content`, `Accept-Ranges: bytes`)** -- so retries resume from wherever
+    they died (`Range: bytes={total}-`, append mode) instead of restarting
+    the whole file, with a local-file-size sanity check before trusting any
+    resume (a mismatched partial file forces a clean restart rather than
+    silently producing a corrupt result). No "attempt N/6" messaging is
+    shown to the user -- just a percentage that only ever climbs.
 
 11. **`SendKeys`-based testing risks hijacking whatever the user is
     actually typing** -- confirmed directly (a test `SendKeys.SendWait`

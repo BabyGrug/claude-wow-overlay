@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 
 
 def _icon_path():
@@ -881,6 +881,13 @@ class ClaudeOverlay:
 
         threading.Thread(target=self._check_for_update_bg, daemon=True).start()
 
+        # Set by installer.py's quiet --update path right before relaunching
+        # this exe, once it's silently re-verified everything and refreshed
+        # the install -- a brief passive confirmation, not a popup, in the
+        # exact spot the update button itself would show.
+        if "--updated" in sys.argv[1:]:
+            self.root.after(200, self._show_just_updated)
+
         self.tray_icon = None
         self._setup_tray_icon()
 
@@ -1482,6 +1489,14 @@ class ClaudeOverlay:
             target=self._download_and_install_update, args=(latest, download_url), daemon=True,
         ).start()
 
+    def _show_just_updated(self):
+        self.update_btn.config(text=f"✓ Updated to v{APP_VERSION}", fg="#4caf50", cursor="")
+        self.root.after(10000, self._clear_just_updated)
+
+    def _clear_just_updated(self):
+        if not self._update_available:  # don't clobber a genuinely newer update that appeared meanwhile
+            self.update_btn.config(text=f"v{APP_VERSION}", fg="#6f6f78", cursor="")
+
     def _show_update_progress(self, payload):
         total, expected = payload
         if expected:
@@ -1497,24 +1512,58 @@ class ClaudeOverlay:
         installer_path = os.path.join(os.environ.get("TEMP", "."), UPDATE_ASSET_NAME)
         max_attempts = 6
         last_error = None
+        total = 0  # persists ACROSS attempts -- see the Range-resume note below
         # The GitHub-release CDN this redirects to has turned out to be
         # genuinely flaky for a ~28MB file -- confirmed by testing directly:
         # 3 different attempts each truncated at a DIFFERENT byte count
-        # (4.1MB, 1.7MB, 25.5MB) before a 4th finally came through complete.
-        # A single .read() masks this as one opaque IncompleteRead; reading
-        # in chunks and explicitly checking the total against Content-Length
-        # is what actually catches every truncation (a plain "empty chunk"
-        # EOF check alone would silently accept a truncated file as done,
-        # which is worse than an error -- also confirmed the hard way).
+        # before one finally came through complete. Confirmed separately
+        # that this CDN (Azure Blob-backed) honors HTTP Range requests (a
+        # real 206 Partial Content, not just ignoring the header) -- so a
+        # failed attempt RESUMES from wherever it stopped instead of
+        # restarting the whole file, which is both faster and means the
+        # percentage the player sees only ever climbs, rather than visibly
+        # resetting to 0% and re-racing itself on every retry. No separate
+        # "attempt N/6, retrying" messaging either -- that's an implementation
+        # detail, not something worth alarming a non-technical user with; the
+        # percentage pausing briefly during a retry is signal enough.
         for attempt in range(max_attempts):
             try:
-                req = urllib.request.Request(download_url, headers={"User-Agent": "ClaudeWowOverlay"})
+                resume_from = total
+                mode = "wb"
+                if resume_from > 0:
+                    # Only trust a resume if the partial file on disk
+                    # actually matches what we think we've already got --
+                    # if it doesn't (or vanished), a Range request against a
+                    # mismatched local file would silently corrupt the
+                    # result instead of erroring, exactly the class of bug
+                    # this CDN already bit us with once.
+                    try:
+                        if os.path.getsize(installer_path) != resume_from:
+                            resume_from = 0
+                    except OSError:
+                        resume_from = 0
+                    if resume_from == 0:
+                        total = 0
+                    else:
+                        mode = "ab"
+
+                headers = {"User-Agent": "ClaudeWowOverlay"}
+                if resume_from > 0:
+                    headers["Range"] = f"bytes={resume_from}-"
+                req = urllib.request.Request(download_url, headers=headers)
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    expected = resp.getheader("Content-Length")
-                    expected = int(expected) if expected else None
-                    total = 0
+                    if resume_from > 0 and resp.status != 206:
+                        # Server ignored the Range header (sent 200 + the
+                        # full file again) -- start over cleanly rather than
+                        # appending a second full copy after the partial one.
+                        total = 0
+                        resume_from = 0
+                        mode = "wb"
+                    content_length = resp.getheader("Content-Length")
+                    content_length = int(content_length) if content_length else None
+                    expected = (resume_from + content_length) if content_length is not None else None
                     last_progress_ts = 0.0
-                    with open(installer_path, "wb") as f:
+                    with open(installer_path, mode) as f:
                         while True:
                             chunk = resp.read(65536)
                             if not chunk:
@@ -1535,10 +1584,6 @@ class ClaudeOverlay:
                 break
             except Exception as exc:
                 last_error = exc
-                self.ui_queue.put((
-                    "status",
-                    f"Download attempt {attempt + 1}/{max_attempts} incomplete, retrying...",
-                ))
                 time.sleep(2)
 
         if last_error:
@@ -1553,7 +1598,13 @@ class ClaudeOverlay:
             self.ui_queue.put(("done", None))
             return
         try:
-            subprocess.Popen([installer_path])
+            # --update: skips the full multi-page wizard for an existing
+            # install and just re-verifies prerequisites + re-copies files
+            # silently, relaunching the overlay when done. Only falls back
+            # to the full wizard if something's actually wrong (logged out,
+            # Claude Desktop gone, etc.) -- see installer.py's
+            # run_quiet_update().
+            subprocess.Popen([installer_path, "--update"])
         except Exception as exc:
             self.ui_queue.put(("answer", (f"Claude: [update downloaded but failed to launch] {exc}", "error")))
             self.ui_queue.put(("update_available", (latest, download_url)))

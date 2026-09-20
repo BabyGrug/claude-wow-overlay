@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.5
+- The update download now genuinely resumes after a dropped connection
+  (confirmed the CDN honors HTTP Range requests) instead of restarting from
+  scratch each retry -- the percentage now only ever climbs, never resets,
+  and the "attempt N/6, retrying..." messaging is gone (it's an
+  implementation detail, not something worth surfacing).
+- Installing an update no longer walks through the full multi-page setup
+  wizard. It now quietly re-verifies the same things the wizard checks
+  (Claude Desktop present, still logged in, WoW addon folder still valid),
+  re-copies the files, and shows a brief green "Updated to vX" confirmation
+  in the title bar instead. Only falls back to the full wizard if a check
+  actually fails (e.g. logged out, Claude Desktop uninstalled) -- that
+  genuinely needs the guided flow again.
+
 ## v1.1.4
 - The ⚙ and ⓘ title bar icons now toggle -- click again to close, same as
   the Settings dialog's X or the tips dialog's "Got it" button.

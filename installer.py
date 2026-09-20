@@ -46,7 +46,7 @@ WINDOW_W, WINDOW_H = 560, 460
 
 # Bump alongside overlay.py's APP_VERSION -- shown in Windows' "Apps &
 # Features" listing via the registry uninstall entry (see register_uninstaller).
-INSTALLER_VERSION = "1.1.4"
+INSTALLER_VERSION = "1.1.5"
 
 UNINSTALL_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWowOverlay"
 
@@ -638,6 +638,59 @@ class InstallerApp:
 
 
 # ============================================================================
+# Quiet update -- same exe, launched with --update by the overlay's own
+# in-app updater once it's downloaded a new setup exe. None of the wizard's
+# prerequisite questions (is Claude Desktop installed? logged in? which WoW
+# folder?) should have changed for an EXISTING install, so re-clicking
+# through the whole multi-page wizard for a routine update is pure friction.
+# This just re-checks those things silently and re-copies the files; the
+# overlay itself shows a brief "Updated to vX" confirmation once it relaunches
+# (see overlay.py's --updated flag). Only falls back to the full wizard if a
+# check actually fails -- e.g. the user got logged out, or Claude Desktop
+# itself is gone -- since THAT genuinely needs the guided flow again.
+# ============================================================================
+
+def run_quiet_update() -> bool:
+    """Returns True if the quiet path handled everything (caller should just
+    exit); False if the full wizard needs to run instead."""
+    claude_exe = find_claude_exe()
+    if not claude_exe:
+        return False
+    logged_in, _ = test_login(claude_exe)
+    if not logged_in:
+        return False
+
+    install_dir = os.path.join(os.environ["LOCALAPPDATA"], "ClaudeWowOverlay")
+    addons_path = None
+    info_path = os.path.join(install_dir, "install_info.json")
+    if os.path.isfile(info_path):
+        try:
+            with open(info_path, "r", encoding="utf-8") as f:
+                addons_path = json.load(f).get("addons_path")
+        except (OSError, json.JSONDecodeError):
+            addons_path = None
+    if not addons_path or not os.path.isdir(addons_path):
+        # Missing (an install from before install_info.json existed -- true
+        # for the very first installs this was ever shipped to) or stale
+        # (WoW moved/got reinstalled elsewhere) -- try to rediscover it the
+        # same way a first-time install would, rather than silently giving
+        # up on refreshing the addon.
+        installs = find_wow_forever_installs()
+        addons_path = installs[0][0] if installs else None
+
+    ok, _ = install_everything(addons_path, lambda msg: None)
+    if not ok:
+        return False
+
+    overlay_exe = os.path.join(install_dir, "ClaudeWowOverlay.exe")
+    try:
+        subprocess.Popen([overlay_exe, "--updated"])
+    except Exception:
+        return False
+    return True
+
+
+# ============================================================================
 # Uninstall -- same exe, launched with --uninstall (that's what the registry
 # entry's UninstallString points at, so "Apps & Features" -> Uninstall just
 # works without a separate download).
@@ -799,5 +852,8 @@ class UninstallApp:
 if __name__ == "__main__":
     if "--uninstall" in sys.argv[1:]:
         UninstallApp().run()
+    elif "--update" in sys.argv[1:]:
+        if not run_quiet_update():
+            InstallerApp().run()
     else:
         InstallerApp().run()
