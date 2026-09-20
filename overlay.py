@@ -97,7 +97,7 @@ WINDOW_W, WINDOW_H = 460, 360
 MODEL = "sonnet"
 EFFORT = "medium"
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 UPDATE_REPO = "BabyGrug/claude-wow-overlay"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ClaudeWowOverlaySetup.exe"
