@@ -1,0 +1,49 @@
+# Changelog
+
+## v1.0.3
+- Shows the running version (e.g. `v1.0.3`) next to the title bar at all
+  times. Turns into the green "Update to vX" button only when a newer
+  version is actually available.
+- A failed update download now resets back to a retryable button instead of
+  getting stuck on "Downloading update...".
+
+## v1.0.2
+- Fixed the in-app updater: GitHub's release-asset CDN turned out to be
+  genuinely flaky for a ~28MB file (three different real attempts each
+  truncated at a different byte count before one came through complete).
+  Now verifies the downloaded size against `Content-Length` and retries
+  (up to 6x) until it's genuinely complete, instead of trusting a partial
+  transfer.
+
+## v1.0.1
+- Test release to verify the update-check/download flow end-to-end. No
+  other functional changes from v1.0.0. (This is the version that surfaced
+  the CDN flakiness fixed in v1.0.2.)
+
+## v1.0.0
+First public release. Everything built in the initial session:
+- Floating, draggable, resizable overlay box (`Ctrl+Shift+Space` to
+  show/hide), styled to match a small dark/purple aesthetic.
+- Runs on the local `claude.exe` CLI via the user's own OAuth login --
+  nothing routes through anyone else.
+- Companion `ClaudeContext` WoW addon: character, location, and quest log
+  read from its SavedVariables file and fed into every question
+  automatically, with explicit staleness/age awareness (only a
+  login/reload/quest-change/new-zone refreshes it).
+- Screenshot analysis (`Ctrl+Shift+S`, works even while the box is hidden
+  so hovering a tooltip in-game doesn't get disturbed) via the CLI's Read
+  tool.
+- `[MAPLOC]` tag -> clickable "Copy location" button -> `/claudemark`
+  addon command -> native in-game waypoint pin.
+- `[SAVENOTE]` tag -> persistent per-character memory (stat priority,
+  talent build, rotation, profession milestones), automatically reused on
+  later questions instead of re-researching, with per-category
+  level-staleness judgment.
+- Ranked WoW Forever source hierarchy (official Blizzard > Wowhead > Icy
+  Veins > boosting-service sites as backup only), with explicit fallback
+  disclosure when nothing Forever-specific exists and general
+  Vanilla/Classic knowledge is used instead.
+- Standalone installer (`installer.py`) -- prerequisite checks, guided
+  Claude login, WoW Forever auto-detection, Start Menu shortcut. Both it
+  and the overlay compile to dependency-free exes via PyInstaller.
+- Auto-update check on startup against GitHub Releases.
