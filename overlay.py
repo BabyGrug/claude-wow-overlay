@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 def _icon_path():
@@ -943,6 +943,17 @@ class ClaudeOverlay:
         settings_btn.bind("<Enter>", lambda e: settings_btn.config(fg=accent))
         settings_btn.bind("<Leave>", lambda e: settings_btn.config(fg="#9a9aa2"))
 
+        # Reopens the same tips dialog shown automatically on first run --
+        # otherwise there was no way back to it once dismissed.
+        info_btn = tk.Label(
+            titlebar, text="ⓘ", bg="#141419", fg="#9a9aa2",
+            font=("Segoe UI", 10), padx=6, cursor="hand2",
+        )
+        info_btn.pack(side="left")
+        info_btn.bind("<Button-1>", lambda e: self._show_first_run_tips())
+        info_btn.bind("<Enter>", lambda e: info_btn.config(fg=accent))
+        info_btn.bind("<Leave>", lambda e: info_btn.config(fg="#9a9aa2"))
+
         # The X just hides the box (same as the hotkey) -- it does NOT exit
         # the app, since the hotkey needs the process alive to bring it back.
         # Actually quitting is the "Quit" button above, next to the title.
@@ -1328,9 +1339,17 @@ class ClaudeOverlay:
     # ---------- first-run tips ----------
 
     def _show_first_run_tips(self):
+        if getattr(self, "_tips_win", None) is not None:
+            try:
+                self._tips_win.lift()
+                return
+            except Exception:
+                pass
+
         bg, bg_dark, fg, accent = "#1e1e24", "#141419", "#e8e8ec", "#7c5cff"
 
         win = tk.Toplevel(self.root, bg=bg)
+        self._tips_win = win
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         # Stay hidden and unsized while content is built -- a hardcoded
@@ -1375,6 +1394,8 @@ class ClaudeOverlay:
              "hidden -- right-click it for Show/Hide, New, Settings, or Quit."),
             ("✕ vs Quit", "✕ just hides the box (same as the hotkey). "
              "\"Quit\" next to the title actually exits."),
+            ("ⓘ button", "Come back to this list anytime -- it's next "
+             "to the gear icon in the title bar."),
         ]
         for label, desc in tips:
             row = tk.Frame(content, bg=bg)
@@ -1391,6 +1412,7 @@ class ClaudeOverlay:
         def dismiss():
             self.settings["seen_first_run_tips"] = True
             save_settings(self.settings)
+            self._tips_win = None
             win.destroy()
 
         footer = tk.Frame(content, bg=bg)

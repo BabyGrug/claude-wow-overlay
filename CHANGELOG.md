@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.3
+- Added a "ⓘ" info button next to the gear icon in the title bar --
+  reopens the first-run tips list anytime, not just automatically on first
+  launch.
+
 ## v1.1.2
 - Added a Stop button (the "Ask" button turns into "Stop" while a question
   is in flight) to cancel an accidental or unwanted query instead of having
