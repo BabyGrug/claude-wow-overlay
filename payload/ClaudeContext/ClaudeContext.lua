@@ -150,6 +150,100 @@ local function CollectQuests()
     return quests
 end
 
+-- Slot API name -> display label. GetInventorySlotInfo/GetInventoryItemLink/
+-- GetItemInfo are foundational globals that predate the quest-log-style API
+-- overhaul (unlike C_QuestLog, there's no known removal of these on this
+-- client) -- no legacy/modern branching needed here.
+local EQUIP_SLOTS = {
+    {"HeadSlot", "Head"}, {"NeckSlot", "Neck"}, {"ShoulderSlot", "Shoulder"},
+    {"BackSlot", "Back"}, {"ChestSlot", "Chest"}, {"WristSlot", "Wrist"},
+    {"HandsSlot", "Hands"}, {"WaistSlot", "Waist"}, {"LegsSlot", "Legs"},
+    {"FeetSlot", "Feet"}, {"Finger0Slot", "Ring 1"}, {"Finger1Slot", "Ring 2"},
+    {"Trinket0Slot", "Trinket 1"}, {"Trinket1Slot", "Trinket 2"},
+    {"MainHandSlot", "Main Hand"}, {"SecondaryHandSlot", "Off Hand"},
+    {"RangedSlot", "Ranged"},
+}
+
+local function CollectEquipped()
+    local items = {}
+    for _, entry in ipairs(EQUIP_SLOTS) do
+        local apiSlot, label = entry[1], entry[2]
+        local slotId = GetInventorySlotInfo and GetInventorySlotInfo(apiSlot)
+        if slotId then
+            local itemLink = GetInventoryItemLink("player", slotId)
+            if itemLink then
+                local name, _, _, ilvl = GetItemInfo(itemLink)
+                table.insert(items, {
+                    slot = label,
+                    -- GetItemInfo can return nil if the item isn't cached
+                    -- client-side yet -- the raw link is still something.
+                    name = name or itemLink,
+                    ilvl = ilvl,
+                })
+            end
+        end
+    end
+    return items
+end
+
+-- BEST-EFFORT: WoW Forever appears to have its own "Legacy Talent System"
+-- (per Blizzard's own BlizzCon materials) rather than the classic 3-tree
+-- talent panel, and there's no reference addon on this client using either
+-- API to verify against (unlike quest logs/bags, which QuestMaster proved).
+-- This tries the classic API and simply omits talent info if it doesn't
+-- exist rather than guessing -- needs in-game confirmation of whether it
+-- ever actually populates on this client.
+local function CollectTalents()
+    if not (GetNumTalentTabs and GetTalentTabInfo) then
+        return nil
+    end
+    local trees = {}
+    local numTabs = GetNumTalentTabs() or 0
+    for tab = 1, numTabs do
+        local name, _, pointsSpent = GetTalentTabInfo(tab)
+        if name and pointsSpent and pointsSpent > 0 then
+            table.insert(trees, name .. ": " .. pointsSpent)
+        end
+    end
+    if #trees == 0 then return nil end
+    return table.concat(trees, ", ")
+end
+
+-- Same C_Container-with-legacy-fallback pattern QuestMaster itself uses on
+-- this client (confirmed via its source) -- proven, not guessed.
+local function CollectBagsAndGold()
+    local money = GetMoney and GetMoney() or 0
+    local itemNames = {}
+    local numBags = NUM_BAG_SLOTS or 4
+    for bag = 0, numBags do
+        local numSlots
+        if C_Container and C_Container.GetContainerNumSlots then
+            numSlots = C_Container.GetContainerNumSlots(bag)
+        elseif GetContainerNumSlots then
+            numSlots = GetContainerNumSlots(bag)
+        end
+        for slot = 1, (numSlots or 0) do
+            local itemLink
+            if C_Container and C_Container.GetContainerItemInfo then
+                local info = C_Container.GetContainerItemInfo(bag, slot)
+                itemLink = info and info.hyperlink
+            elseif GetContainerItemLink then
+                itemLink = GetContainerItemLink(bag, slot)
+            end
+            if itemLink then
+                local name = GetItemInfo(itemLink)
+                table.insert(itemNames, name or itemLink)
+            end
+        end
+    end
+    return {
+        gold = math.floor(money / 10000),
+        silver = math.floor((money % 10000) / 100),
+        copper = money % 100,
+        items = itemNames,
+    }
+end
+
 local function BuildContext()
     local localizedClass, englishClass = UnitClass("player")
     local localizedRace, englishRace = UnitRace("player")
@@ -164,7 +258,7 @@ local function BuildContext()
     if x then location.x = math.floor(x * 1000 + 0.5) / 10 end
     if y then location.y = math.floor(y * 1000 + 0.5) / 10 end
 
-    return {
+    local context = {
         savedAt = date("%Y-%m-%d %H:%M:%S"),
         character = {
             name = UnitName("player") or "",
@@ -176,7 +270,16 @@ local function BuildContext()
         },
         location = location,
         quests = CollectQuests(),
+        equipped = CollectEquipped(),
+        bags = CollectBagsAndGold(),
     }
+
+    local talents = CollectTalents()
+    if talents then
+        context.talents = talents
+    end
+
+    return context
 end
 
 local function Sync()

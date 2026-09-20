@@ -133,6 +133,53 @@ the visible text and turned into UI:
     SendKeys for interactive testing; use process-alive checks, log files,
     or a direct backend call to the relevant Python function instead.
 
+12. **A `--windowed` PyInstaller build has no console, so `sys.stdout`/
+    `sys.stderr` are literally `None`.** Python's own default `sys.excepthook`
+    and Tkinter's default `report_callback_exception` both try to write a
+    traceback to `sys.stderr` -- on a windowed build that itself raises
+    `AttributeError` and swallows the real error with zero trace. Fixed by
+    redirecting both to `os.devnull` at import time if they're `None`, and by
+    replacing all three exception-reporting paths (`sys.excepthook`,
+    `threading.excepthook`, `Tk.report_callback_exception`) with a logger that
+    only ever writes to `%LOCALAPPDATA%\ClaudeWowOverlay\crash.log`, never to
+    stdout/stderr. See `_log_crash` / the crash-logging block near the top of
+    `overlay.py`.
+
+13. **`pystray`'s `Icon.run_detached()` spawns a non-daemon thread.** A
+    Python process won't exit naturally while it's alive -- harmless in the
+    real app since `quit()` calls `os._exit(0)` (a hard kill that doesn't wait
+    for thread joins), but it means any throwaway test script that
+    instantiates `ClaudeOverlay()` for real must also force-exit
+    (`os._exit(...)`) rather than falling off the end of the script, or it'll
+    hang forever waiting to join that thread.
+
+14. **PyInstaller already ships a hook for `pystray`**
+    (`hook-pystray.py` in `_pyinstaller_hooks_contrib`) -- it's picked up
+    automatically, no `--hidden-import` needed for the tray icon to work in
+    the compiled exe.
+
+15. **A `tk.Toplevel` sized via a hardcoded `geometry()` call silently clips
+    content pack() can't fit** -- same class of bug as the earlier pack()-vs-
+    grid() layout bug (#2 in the original build), hit again in
+    `_show_first_run_tips`: adding two more tips made the footer (and its
+    "Got it" button) not fit in the guessed height, and pack() just never
+    mapped it -- no error, no visible sign, the button was simply
+    unclickable. Root-caused via `winfo_ismapped()` returning `0` on the
+    button, not by guessing. Fixed by building all content first with the
+    window withdrawn, then sizing from the real `winfo_reqheight()` before
+    showing it -- never hardcode a Toplevel's height when its content can
+    change.
+
+16. **Can't fully delete a folder that contains your own currently-running
+    exe in one step.** The uninstaller (`installer.py --uninstall`) needs to
+    remove its own install directory, but it's a file inside that same
+    directory while it's running. Fixed with the standard self-deleting-
+    installer trick: remove everything else first (shortcut, addon folder,
+    registry key), then hand off to a detached `cmd /c timeout /t 2 & rmdir
+    /s /q <install_dir>` that outlives this process and finishes the job a
+    couple seconds after it exits. No admin rights needed, since it's all
+    under `%LOCALAPPDATA%`.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)
@@ -164,10 +211,14 @@ the visible text and turned into UI:
    `Claude WoW Overlay <noreply@users.noreply.github.com>`, never the real
    account -- see Privacy) `&& git tag vX.Y.Z && git push origin main vX.Y.Z`.
 6. `gh release create vX.Y.Z dist/ClaudeWowOverlaySetup.exe --title vX.Y.Z --notes "..."`.
-7. Deploy straight to the dev machine's live install
-   (`%LOCALAPPDATA%\ClaudeWowOverlay\ClaudeWowOverlay.exe`) via PowerShell
-   `Copy-Item` -- don't round-trip through the in-app updater on the dev
-   machine when the just-built file is right there.
+7. **Do NOT deploy the new exe to the dev machine's live install.** Leave
+   `%LOCALAPPDATA%\ClaudeWowOverlay\ClaudeWowOverlay.exe` as it is after every
+   release -- the user wants the still-running old version to detect the new
+   GitHub release and go through its own real update-check/download/install
+   flow instead, every time, as the standard way of verifying a release
+   actually works end-to-end. (This reverses the original v1.0.x-era
+   approach, which bypassed the updater to save a step -- that shortcut is
+   no longer wanted.)
 8. Update this file and `CHANGELOG.md` if anything gotcha-worthy or
    version-notable happened.
 

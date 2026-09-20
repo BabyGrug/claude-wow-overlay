@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.1.0
+- Settings panel (⚙ gear icon): choose the Claude model (Sonnet/Opus/Fable)
+  and effort level (Low/Medium/High), with Sonnet + Medium recommended by
+  default. Also edit either hotkey from here, live.
+- Window position and size are now remembered between sessions.
+- The WoW addon now also reports equipped gear (all 17 slots, with item
+  level), bag contents and gold, and a best-effort talent-points summary
+  (WoW Forever's talent API isn't fully confirmed, so this degrades to
+  "no talent data" gracefully rather than guessing).
+- Crash recovery: unexpected errors are now logged to
+  `%LOCALAPPDATA%\ClaudeWowOverlay\crash.log` instead of silently vanishing
+  (a real risk for a windowed app with no console), and the box shows a
+  short "something went wrong" note instead of freezing up.
+- System tray icon: stays available when the box is hidden, with a
+  right-click menu (Show/Hide, New conversation, Settings, Quit) and a
+  toast notification when an answer finishes while the box is hidden.
+- Right-click the camera button (or the screenshot area) to drag-select
+  just part of the screen instead of always capturing the whole desktop --
+  useful for cropping out just a comparison tooltip.
+- Clearer errors when you're offline (checked up front, before waiting out
+  a timeout) or when Claude is rate-limited/over quota.
+- A proper "Apps & Features" uninstall entry -- Windows Settings > Apps can
+  now remove the app, the WoW addon, the shortcut, and saved settings
+  cleanly, instead of needing to delete folders by hand.
+- Expanded first-run tips to cover all of the above.
+
 ## v1.0.3
 - Shows the running version (e.g. `v1.0.3`) next to the title bar at all
   times. Turns into the green "Update to vX" button only when a newer

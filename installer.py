@@ -19,6 +19,7 @@ exe under sys._MEIPASS/payload/ once built with build_installer.py):
 """
 
 import glob
+import json
 import os
 import re
 import shutil
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import winreg
 from tkinter import filedialog
 
 # ============================================================================
@@ -41,6 +43,12 @@ GREEN = "#4caf50"
 RED = "#ff6b6b"
 
 WINDOW_W, WINDOW_H = 560, 460
+
+# Bump alongside overlay.py's APP_VERSION -- shown in Windows' "Apps &
+# Features" listing via the registry uninstall entry (see register_uninstaller).
+INSTALLER_VERSION = "1.1.0"
+
+UNINSTALL_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWowOverlay"
 
 
 def resource_path(*parts):
@@ -151,6 +159,32 @@ def set_persistent_token(token):
 # Installation actions
 # ============================================================================
 
+def register_uninstaller(install_dir, uninstall_string, icon_dst):
+    """Adds an 'Apps & Features' entry so the app can be removed the normal
+    Windows way, not just by deleting folders by hand. HKCU (not HKLM) --
+    matches the rest of the install, which never needs admin rights."""
+    try:
+        size_kb = 0
+        for fname in os.listdir(install_dir):
+            fpath = os.path.join(install_dir, fname)
+            if os.path.isfile(fpath):
+                size_kb += os.path.getsize(fpath) // 1024
+    except OSError:
+        size_kb = 0
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_REG_KEY) as key:
+        winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Claude WoW Overlay")
+        winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, INSTALLER_VERSION)
+        winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Claude WoW Overlay")
+        winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_dst)
+        winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, uninstall_string)
+        winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, install_dir)
+        winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
+        winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
+        if size_kb:
+            winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, size_kb)
+
+
 def install_everything(addons_path, progress_cb):
     """Copies the overlay + addon into place and creates a Start Menu
     shortcut. progress_cb(str) is called with a short status after each step.
@@ -164,6 +198,36 @@ def install_everything(addons_path, progress_cb):
         shutil.copy2(resource_path("ClaudeWowOverlay.exe"), overlay_dst)
         icon_dst = os.path.join(install_dir, "icon.ico")
         shutil.copy2(resource_path("icon.ico"), icon_dst)
+
+        # Copy this same setup exe into the install dir too, purely so the
+        # registry's UninstallString has something stable to point at --
+        # the original download (Desktop, Downloads, wherever) might get
+        # moved or deleted long before the user ever uninstalls. Skipped in
+        # dev mode (running as a plain script), where sys.executable is just
+        # the Python interpreter, not a real standalone copy of this tool.
+        setup_exe_dst = None
+        if getattr(sys, "frozen", False):
+            setup_exe_dst = os.path.join(install_dir, "ClaudeWowOverlaySetup.exe")
+            try:
+                shutil.copy2(sys.executable, setup_exe_dst)
+            except OSError:
+                setup_exe_dst = None
+
+        # Remembered so the uninstaller can find and remove the WoW addon
+        # folder too, without re-asking the user where WoW is installed.
+        try:
+            with open(os.path.join(install_dir, "install_info.json"), "w", encoding="utf-8") as f:
+                json.dump({"addons_path": addons_path}, f)
+        except OSError:
+            pass
+
+        if setup_exe_dst:
+            try:
+                register_uninstaller(
+                    install_dir, f'"{setup_exe_dst}" --uninstall', icon_dst,
+                )
+            except OSError:
+                pass  # a missing "Apps & Features" entry shouldn't fail the install
 
         if addons_path:
             progress_cb("Installing the WoW addon...")
@@ -573,5 +637,167 @@ class InstallerApp:
         self.root.mainloop()
 
 
+# ============================================================================
+# Uninstall -- same exe, launched with --uninstall (that's what the registry
+# entry's UninstallString points at, so "Apps & Features" -> Uninstall just
+# works without a separate download).
+# ============================================================================
+
+def do_uninstall(progress_cb, install_dir=None, shortcut_path=None):
+    """Removes everything install_everything() put in place, except the
+    install directory itself and this running exe -- those are deleted by a
+    short detached command scheduled to run just after this process exits
+    (deleting a file/folder a running exe's own image is still open from can
+    fail partway through otherwise). progress_cb(str) reports status.
+
+    install_dir/shortcut_path default to the real production paths; the
+    parameters exist so tests can point this at disposable temp paths
+    instead -- this function kills a running ClaudeWowOverlay.exe by name
+    and recursively deletes a whole folder, so it must never run against
+    real paths outside of an actual uninstall."""
+    if install_dir is None:
+        install_dir = os.path.join(os.environ["LOCALAPPDATA"], "ClaudeWowOverlay")
+    if shortcut_path is None:
+        shortcut_path = os.path.join(
+            os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu",
+            "Programs", "Claude WoW Overlay.lnk",
+        )
+
+    progress_cb("Stopping the overlay if it's running...")
+    subprocess.run(
+        ["taskkill", "/IM", "ClaudeWowOverlay.exe", "/F"],
+        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+    progress_cb("Removing the WoW addon...")
+    try:
+        with open(os.path.join(install_dir, "install_info.json"), "r", encoding="utf-8") as f:
+            addons_path = json.load(f).get("addons_path")
+        if addons_path:
+            addon_dir = os.path.join(addons_path, "ClaudeContext")
+            if os.path.isdir(addon_dir):
+                shutil.rmtree(addon_dir, ignore_errors=True)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    progress_cb("Removing the Start Menu shortcut...")
+    try:
+        if os.path.isfile(shortcut_path):
+            os.remove(shortcut_path)
+    except OSError:
+        pass
+
+    progress_cb("Removing settings...")
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_REG_KEY)
+    except OSError:
+        pass
+
+    # This exe is itself a file inside install_dir and still running --
+    # rmdir it directly and it can fail partway through. Instead, hand off to
+    # a detached `cmd` that waits a couple seconds (long enough for this
+    # process to fully exit and release its file handle) and then removes
+    # the whole folder, itself included. Standard self-deleting-installer
+    # trick; no admin rights needed since it's all under %LOCALAPPDATA%.
+    progress_cb("Finishing up...")
+    try:
+        subprocess.Popen(
+            ["cmd", "/c", "timeout", "/t", "2", "/nobreak", ">nul",
+             "&", "rmdir", "/s", "/q", install_dir],
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+            close_fds=True,
+        )
+    except OSError:
+        pass
+
+
+class UninstallApp:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Uninstall Claude WoW Overlay")
+        self.root.configure(bg=BG)
+        self.root.geometry(f"{WINDOW_W}x{WINDOW_H}")
+        self.root.resizable(False, False)
+        try:
+            self.root.iconbitmap(resource_path("icon.ico"))
+        except Exception:
+            pass
+
+        self.root.update_idletasks()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self.root.geometry(f"+{(sw - WINDOW_W) // 2}+{(sh - WINDOW_H) // 3}")
+
+        self.content = tk.Frame(self.root, bg=BG)
+        self.content.pack(fill="both", expand=True)
+
+        self._page_confirm()
+
+    def _clear(self):
+        for widget in self.content.winfo_children():
+            widget.destroy()
+
+    def _header(self, title, subtitle=""):
+        tk.Label(
+            self.content, text=title, bg=BG, fg=FG,
+            font=("Segoe UI", 16, "bold"), anchor="w",
+        ).pack(fill="x", padx=32, pady=(32, 4))
+        if subtitle:
+            tk.Label(
+                self.content, text=subtitle, bg=BG, fg=FG_DIM,
+                font=("Segoe UI", 10), anchor="w", justify="left", wraplength=496,
+            ).pack(fill="x", padx=32, pady=(0, 16))
+
+    def _button(self, parent, text, command, primary=True):
+        bg = ACCENT if primary else BG_FIELD
+        fg = "white" if primary else FG
+        btn = tk.Label(
+            parent, text=text, bg=bg, fg=fg, font=("Segoe UI", 10, "bold"),
+            padx=18, pady=8, cursor="hand2",
+        )
+        btn.bind("<Button-1>", lambda e: command())
+        return btn
+
+    def _page_confirm(self):
+        self._clear()
+        self._header(
+            "Uninstall Claude WoW Overlay?",
+            "This removes the app, the WoW addon, your Start Menu shortcut, "
+            "and your saved settings/notes. This can't be undone.",
+        )
+        footer = tk.Frame(self.content, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=32, pady=24)
+        self._button(footer, "Uninstall", self._page_uninstalling).pack(side="right")
+        self._button(footer, "Cancel", self.root.destroy, primary=False).pack(side="right", padx=(0, 8))
+
+    def _page_uninstalling(self):
+        self._clear()
+        self._header("Uninstalling...")
+        self.status_lbl = tk.Label(
+            self.content, text="Starting...", bg=BG, fg=FG_DIM,
+            font=("Segoe UI", 10), anchor="w",
+        )
+        self.status_lbl.pack(fill="x", padx=32, pady=16)
+        threading.Thread(target=self._do, daemon=True).start()
+
+    def _do(self):
+        def progress(text):
+            self.root.after(0, lambda: self.status_lbl.config(text=text))
+        do_uninstall(progress)
+        self.root.after(300, self._page_done)
+
+    def _page_done(self):
+        self._clear()
+        self._header("Uninstalled", "Claude WoW Overlay has been removed. Thanks for trying it out.")
+        footer = tk.Frame(self.content, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=32, pady=24)
+        self._button(footer, "Close", self.root.destroy).pack(side="right")
+
+    def run(self):
+        self.root.mainloop()
+
+
 if __name__ == "__main__":
-    InstallerApp().run()
+    if "--uninstall" in sys.argv[1:]:
+        UninstallApp().run()
+    else:
+        InstallerApp().run()

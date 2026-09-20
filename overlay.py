@@ -41,16 +41,69 @@ import json
 import os
 import queue
 import re
+import socket
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 import urllib.request
 import uuid
 from tkinter import font as tkfont
 
 import keyboard
-from PIL import Image, ImageGrab
+import pystray
+from PIL import Image, ImageDraw, ImageGrab
+
+# ============================================================================
+# Crash logging -- installed before anything else touches sys.stdout/stderr.
+# A --windowed PyInstaller build has NO console, so sys.stdout/sys.stderr are
+# literally None -- Python's own default excepthook (and Tkinter's default
+# report_callback_exception) both try to write a traceback to sys.stderr,
+# which would itself raise AttributeError and swallow the real error with no
+# trace at all. Everything here writes to a log file instead, never to
+# stdout/stderr, so a crash is at least diagnosable after the fact.
+# ============================================================================
+
+CRASH_LOG_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "crash.log"
+)
+
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
+
+def _log_crash(exc_type, exc_value, exc_tb, *, thread_name=None):
+    try:
+        os.makedirs(os.path.dirname(CRASH_LOG_PATH), exist_ok=True)
+        header = f"=== {datetime.datetime.now():%Y-%m-%d %H:%M:%S}"
+        if thread_name:
+            header += f" (thread: {thread_name})"
+        header += f" -- v{APP_VERSION} ===\n"
+        with open(CRASH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(header)
+            traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+            f.write("\n")
+    except Exception:
+        pass  # logging the crash must never itself be what crashes the app
+
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    _log_crash(exc_type, exc_value, exc_tb)
+
+
+def _thread_excepthook(args):
+    _log_crash(
+        args.exc_type, args.exc_value, args.exc_traceback,
+        thread_name=args.thread.name if args.thread else None,
+    )
+
+
+sys.excepthook = _excepthook
+threading.excepthook = _thread_excepthook
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -90,14 +143,84 @@ def force_foreground(hwnd: int):
             user32.AttachThreadInput(fg_thread, cur_thread, False)
     return ok and user32.GetForegroundWindow() == hwnd
 
-HOTKEY = "ctrl+shift+space"
-SCREENSHOT_HOTKEY = "ctrl+shift+s"
-SCREENSHOT_HOTKEY_DISPLAY = "Ctrl+Shift+S"
 WINDOW_W, WINDOW_H = 460, 360
-MODEL = "sonnet"
-EFFORT = "medium"
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.1.0"
+
+
+def _icon_path():
+    """icon.ico lives next to the exe once installed (the installer copies it
+    there itself -- see installer.py's resource_path/install step), or next
+    to this script when run straight from source for dev testing."""
+    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+        else os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, "icon.ico")
+    return path if os.path.isfile(path) else None
+
+# ============================================================================
+# Settings -- persisted per-user, editable from the in-app Settings dialog.
+# Everything here is a DEFAULT; the running values live in self.settings on
+# the ClaudeOverlay instance, loaded from disk at startup and saved whenever
+# the Settings dialog is confirmed, or the window moves/resizes.
+# ============================================================================
+
+SETTINGS_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "settings.json"
+)
+
+DEFAULT_SETTINGS = {
+    "model": "sonnet",
+    "effort": "medium",
+    "hotkey": "ctrl+shift+space",
+    "screenshot_hotkey": "ctrl+shift+s",
+    "window_x": None,   # None -> use the default top-right placement
+    "window_y": None,
+    "window_w": WINDOW_W,
+    "window_h": WINDOW_H,
+    "seen_first_run_tips": False,
+}
+
+# (value, label) -- label is what the Settings dialog shows; value is what
+# gets passed to claude.exe's --model/--effort flags. "sonnet"/"opus"/"fable"
+# are the actual valid --model aliases the CLI accepts (confirmed via its own
+# --help text); effort choices are a curated subset of the 5 the CLI supports
+# (low/medium/high/xhigh/max) -- xhigh/max omitted from the UI as overkill
+# for this app and a surprise-cost risk for casual users.
+MODEL_CHOICES = [
+    ("sonnet", "Sonnet -- balanced (recommended)"),
+    ("opus", "Opus -- most capable, slower & pricier"),
+    ("fable", "Fable -- fastest, least capable"),
+]
+EFFORT_CHOICES = [
+    ("low", "Low -- fastest, cheapest"),
+    ("medium", "Medium -- balanced (recommended)"),
+    ("high", "High -- most thorough, slower & pricier"),
+]
+
+
+def load_settings() -> dict:
+    settings = dict(DEFAULT_SETTINGS)
+    if os.path.isfile(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                settings.update(json.load(f))
+        except Exception:
+            pass
+    return settings
+
+
+def save_settings(settings: dict):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except Exception:
+        pass
+
+
+def format_hotkey_display(hotkey: str) -> str:
+    """"ctrl+shift+s" -> "Ctrl+Shift+S" """
+    return "+".join(part.capitalize() for part in hotkey.split("+"))
 UPDATE_REPO = "BabyGrug/claude-wow-overlay"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ClaudeWowOverlaySetup.exe"
@@ -167,19 +290,42 @@ SCREENSHOT_MAX_WIDTH = 1600  # downscaled if wider -- plenty legible, cheaper/fa
 SCREENSHOT_MAX_AGE_HOURS = 24
 
 
+def _save_screenshot(img) -> str:
+    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+    path = os.path.join(SCREENSHOTS_DIR, f"shot_{int(time.time())}.png")
+    img.save(path)
+    return path
+
+
+def _downscale_if_huge(img):
+    if img.width > SCREENSHOT_MAX_WIDTH:
+        new_h = int(img.height * (SCREENSHOT_MAX_WIDTH / img.width))
+        return img.resize((SCREENSHOT_MAX_WIDTH, new_h), Image.LANCZOS)
+    return img
+
+
 def take_screenshot() -> str:
     """Grabs every monitor (not just the primary one -- WoW may not be on it),
     downscales if it's huge, and saves as a timestamped PNG. Returns the path.
     Caller is responsible for hiding the overlay window first so it isn't
     captured on top of the game."""
-    os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-    img = ImageGrab.grab(all_screens=True)
-    if img.width > SCREENSHOT_MAX_WIDTH:
-        new_h = int(img.height * (SCREENSHOT_MAX_WIDTH / img.width))
-        img = img.resize((SCREENSHOT_MAX_WIDTH, new_h), Image.LANCZOS)
-    path = os.path.join(SCREENSHOTS_DIR, f"shot_{int(time.time())}.png")
-    img.save(path)
-    return path
+    img = _downscale_if_huge(ImageGrab.grab(all_screens=True))
+    return _save_screenshot(img)
+
+
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+
+
+def _virtual_screen_bounds():
+    """(x, y, w, h) of the full multi-monitor virtual desktop -- matches the
+    coordinate space PIL.ImageGrab.grab(all_screens=True) uses, which can
+    start at a negative x/y when a monitor sits left of/above the primary."""
+    gsm = user32.GetSystemMetrics
+    return (
+        gsm(SM_XVIRTUALSCREEN), gsm(SM_YVIRTUALSCREEN),
+        gsm(SM_CXVIRTUALSCREEN), gsm(SM_CYVIRTUALSCREEN),
+    )
 
 
 def cleanup_old_screenshots(max_age_hours=SCREENSHOT_MAX_AGE_HOURS):
@@ -481,6 +627,33 @@ def format_wow_context(data: dict) -> str:
     else:
         lines.append("Active quests: none logged")
 
+    equipped = data.get("equipped", [])
+    if equipped:
+        gear_bits = []
+        for item in equipped:
+            ilvl_bit = f" (ilvl {item['ilvl']})" if item.get("ilvl") else ""
+            gear_bits.append(f"{item.get('slot', '?')}: {item.get('name', '?')}{ilvl_bit}")
+        lines.append("Equipped gear: " + "; ".join(gear_bits))
+    else:
+        lines.append("Equipped gear: none reported")
+
+    talents = data.get("talents")
+    if talents:
+        lines.append(
+            f"Talent points spent (best-effort -- WoW Forever's talent API "
+            f"isn't fully confirmed, treat as approximate): {talents}"
+        )
+
+    bags = data.get("bags")
+    if bags:
+        gold, silver, copper = bags.get("gold", 0), bags.get("silver", 0), bags.get("copper", 0)
+        items = bags.get("items", [])
+        items_bit = ", ".join(items[:20]) if items else "empty"
+        more_bit = f" (+{len(items) - 20} more)" if len(items) > 20 else ""
+        lines.append(
+            f"Bags: {gold}g {silver}s {copper}c, carrying: {items_bit}{more_bit}"
+        )
+
     lines.append(
         f"(captured {_format_age(data.get('savedAt'))}, at "
         f"{data.get('savedAt', 'an unknown time')} -- remember: only a "
@@ -589,6 +762,19 @@ def get_current_character_identity():
         return None, None, None
 
 
+def _internet_available(timeout: float = 3.0) -> bool:
+    """A quick TCP handshake to the exact host claude.exe itself needs to
+    reach -- not a generic ping target. Run this before spawning the CLI so
+    a genuinely offline player gets an immediate, honest "you're offline"
+    message instead of waiting out the full subprocess timeout and then
+    having to guess what the CLI's own network-failure text looks like."""
+    try:
+        socket.create_connection(("api.anthropic.com", 443), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
 def find_claude_exe() -> str:
     """Locate the bundled Claude Code CLI, preferring the newest version.
 
@@ -630,6 +816,8 @@ def find_claude_exe() -> str:
 
 class ClaudeOverlay:
     def __init__(self):
+        self.settings = load_settings()
+
         self.claude_exe = None
         self.claude_exe_error = None
         try:
@@ -648,7 +836,14 @@ class ClaudeOverlay:
             pass  # never let housekeeping block startup
 
         self.root = tk.Tk()
+        self.root.report_callback_exception = self._tk_callback_exception
         self.root.title("Claude")
+        icon_path = _icon_path()
+        if icon_path:
+            try:
+                self.root.iconbitmap(icon_path)
+            except tk.TclError:
+                pass
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         try:
@@ -656,21 +851,46 @@ class ClaudeOverlay:
         except tk.TclError:
             pass
 
-        screen_w = self.root.winfo_screenwidth()
-        x = screen_w - WINDOW_W - 40
-        y = 60
-        self.root.geometry(f"{WINDOW_W}x{WINDOW_H}+{x}+{y}")
+        w = self.settings.get("window_w") or WINDOW_W
+        h = self.settings.get("window_h") or WINDOW_H
+        x = self.settings.get("window_x")
+        y = self.settings.get("window_y")
+        if x is None or y is None:
+            screen_w = self.root.winfo_screenwidth()
+            x = screen_w - w - 40
+            y = 60
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
         self._build_ui()
         self.root.withdraw()  # start hidden; hotkey brings it up
 
         self.root.after(100, self._drain_ui_queue)
         self._register_hotkey()
+        self._active_hotkey = self.settings["hotkey"]
+        self._active_screenshot_hotkey = self.settings["screenshot_hotkey"]
 
         if self.claude_exe_error:
             self._append_answer(f"[setup problem] {self.claude_exe_error}")
 
+        if not self.settings.get("seen_first_run_tips"):
+            self.root.after(300, self._show_first_run_tips)
+
         threading.Thread(target=self._check_for_update_bg, daemon=True).start()
+
+        self.tray_icon = None
+        self._setup_tray_icon()
+
+    def _tk_callback_exception(self, exc_type, exc_value, exc_tb):
+        """Replaces Tkinter's default report_callback_exception, which prints
+        to sys.stderr -- None in a --windowed build, so the default handler
+        would itself throw and the original error would vanish with zero
+        trace. Log it to disk and surface a short note in the status line
+        instead of letting the box silently stop responding."""
+        _log_crash(exc_type, exc_value, exc_tb, thread_name="tk-callback")
+        try:
+            self.status_var.set("⚠ Something went wrong -- logged, try again")
+        except Exception:
+            pass
 
     # ---------- UI ----------
 
@@ -709,6 +929,15 @@ class ClaudeOverlay:
         quit_btn.bind("<Button-1>", lambda e: self.quit())
         quit_btn.bind("<Enter>", lambda e: quit_btn.config(fg="#ff6b6b"))
         quit_btn.bind("<Leave>", lambda e: quit_btn.config(fg="#9a9aa2"))
+
+        settings_btn = tk.Label(
+            titlebar, text="⚙", bg="#141419", fg="#9a9aa2",
+            font=("Segoe UI", 10), padx=6, cursor="hand2",
+        )
+        settings_btn.pack(side="left")
+        settings_btn.bind("<Button-1>", lambda e: self._open_settings_dialog())
+        settings_btn.bind("<Enter>", lambda e: settings_btn.config(fg=accent))
+        settings_btn.bind("<Leave>", lambda e: settings_btn.config(fg="#9a9aa2"))
 
         # The X just hides the box (same as the hotkey) -- it does NOT exit
         # the app, since the hotkey needs the process alive to bring it back.
@@ -801,10 +1030,11 @@ class ClaudeOverlay:
         screenshot_wrap.grid(row=0, column=1, sticky="ns", padx=(0, 6))
 
         screenshot_hotkey_lbl = tk.Label(
-            screenshot_wrap, text=SCREENSHOT_HOTKEY_DISPLAY, bg="#2a2a33",
-            fg="#6f6f78", font=("Segoe UI", 6),
+            screenshot_wrap, text=format_hotkey_display(self.settings["screenshot_hotkey"]),
+            bg="#2a2a33", fg="#6f6f78", font=("Segoe UI", 6),
         )
         screenshot_hotkey_lbl.pack(side="top", pady=(3, 0))
+        self.screenshot_hotkey_lbl = screenshot_hotkey_lbl
 
         screenshot_btn = tk.Label(
             screenshot_wrap, text="\U0001F4F7", bg="#2a2a33",
@@ -814,6 +1044,12 @@ class ClaudeOverlay:
 
         for widget in (screenshot_wrap, screenshot_hotkey_lbl, screenshot_btn):
             widget.bind("<Button-1>", lambda e: self.ask_about_screen())
+            # Right-click for a drag-to-select region instead of the whole
+            # desktop -- left-click/hotkey stay full-screen on purpose, since
+            # the whole point of those is capturing without touching the
+            # mouse (e.g. mid-tooltip-hover); region-select is an explicit,
+            # deliberate action so it's fine to require a drag for it.
+            widget.bind("<Button-3>", lambda e: self.ask_about_screen_region())
             widget.bind("<Enter>", lambda e: (screenshot_btn.config(fg=accent),
                                                screenshot_hotkey_lbl.config(fg=accent)))
             widget.bind("<Leave>", lambda e: (screenshot_btn.config(fg=fg),
@@ -881,13 +1117,275 @@ class ClaudeOverlay:
 
     def _register_hotkey(self):
         try:
-            keyboard.add_hotkey(HOTKEY, self._on_hotkey)
+            keyboard.add_hotkey(self.settings["hotkey"], self._on_hotkey)
         except Exception as exc:
             self._append_answer(f"[hotkey setup failed] {exc}", tag="error")
         try:
-            keyboard.add_hotkey(SCREENSHOT_HOTKEY, self._on_screenshot_hotkey)
+            keyboard.add_hotkey(self.settings["screenshot_hotkey"], self._on_screenshot_hotkey)
         except Exception as exc:
             self._append_answer(f"[screenshot hotkey setup failed] {exc}", tag="error")
+
+    def _reregister_hotkeys(self):
+        """Called after the Settings dialog changes a hotkey -- tears down
+        whatever's currently bound and re-registers from self.settings."""
+        for hk in (self._active_hotkey, self._active_screenshot_hotkey):
+            try:
+                keyboard.remove_hotkey(hk)
+            except Exception:
+                pass
+        self._register_hotkey()
+        self._active_hotkey = self.settings["hotkey"]
+        self._active_screenshot_hotkey = self.settings["screenshot_hotkey"]
+
+    # ---------- settings dialog ----------
+
+    def _open_settings_dialog(self):
+        if getattr(self, "_settings_win", None) is not None:
+            try:
+                self._settings_win.lift()
+                return
+            except Exception:
+                pass
+
+        bg, bg_dark, fg, accent = "#1e1e24", "#141419", "#e8e8ec", "#7c5cff"
+
+        win = tk.Toplevel(self.root, bg=bg)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        mx, my = self.root.winfo_x(), self.root.winfo_y()
+        win.geometry(f"340x460+{mx + 40}+{my + 20}")
+        self._settings_win = win
+
+        outer = tk.Frame(win, bg=accent)
+        outer.pack(fill="both", expand=True)
+        card = tk.Frame(outer, bg=bg)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(card, bg=bg_dark, height=32)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        tk.Label(
+            titlebar, text="Settings", bg=bg_dark, fg=fg,
+            font=("Segoe UI", 10, "bold"), padx=10,
+        ).pack(side="left")
+
+        def do_close():
+            self._settings_win = None
+            win.destroy()
+
+        close_lbl = tk.Label(
+            titlebar, text="✕", bg=bg_dark, fg="#9a9aa2",
+            font=("Segoe UI", 11), padx=10, cursor="hand2",
+        )
+        close_lbl.pack(side="right")
+        close_lbl.bind("<Button-1>", lambda e: do_close())
+
+        drag_state = {}
+
+        def start_drag(e):
+            drag_state["x"], drag_state["y"] = e.x, e.y
+
+        def do_drag(e):
+            win.geometry(f"+{win.winfo_pointerx() - drag_state.get('x', 0)}"
+                         f"+{win.winfo_pointery() - drag_state.get('y', 0)}")
+
+        titlebar.bind("<ButtonPress-1>", start_drag)
+        titlebar.bind("<B1-Motion>", do_drag)
+
+        content = tk.Frame(card, bg=bg)
+        content.pack(fill="both", expand=True, padx=16, pady=12)
+
+        model_var = tk.StringVar(value=self.settings["model"])
+        effort_var = tk.StringVar(value=self.settings["effort"])
+
+        def build_choice_group(parent, title, choices, var):
+            tk.Label(
+                parent, text=title, bg=bg, fg=fg,
+                font=("Segoe UI", 10, "bold"), anchor="w",
+            ).pack(fill="x", pady=(8, 4))
+            rows = {}
+
+            def select(value):
+                var.set(value)
+                for v, (dot, lbl) in rows.items():
+                    if v == value:
+                        dot.config(text="◉", fg=accent)
+                        lbl.config(fg=fg)
+                    else:
+                        dot.config(text="○", fg="#6f6f78")
+                        lbl.config(fg="#9a9aa2")
+
+            for value, label in choices:
+                row = tk.Frame(parent, bg=bg, cursor="hand2")
+                row.pack(fill="x", pady=1)
+                dot = tk.Label(row, text="○", bg=bg, fg="#6f6f78", font=("Segoe UI", 10), padx=4)
+                dot.pack(side="left")
+                lbl = tk.Label(row, text=label, bg=bg, fg="#9a9aa2", font=("Segoe UI", 9), anchor="w")
+                lbl.pack(side="left", fill="x", expand=True)
+                rows[value] = (dot, lbl)
+                for w in (row, dot, lbl):
+                    w.bind("<Button-1>", lambda e, v=value: select(v))
+            select(var.get())
+
+        build_choice_group(content, "Model", MODEL_CHOICES, model_var)
+        build_choice_group(content, "Effort", EFFORT_CHOICES, effort_var)
+
+        tk.Label(
+            content, text="Hotkeys", bg=bg, fg=fg,
+            font=("Segoe UI", 10, "bold"), anchor="w",
+        ).pack(fill="x", pady=(14, 4))
+
+        def hotkey_row(parent, label_text, current_value):
+            row = tk.Frame(parent, bg=bg)
+            row.pack(fill="x", pady=3)
+            tk.Label(
+                row, text=label_text, bg=bg, fg="#9a9aa2",
+                font=("Segoe UI", 9), width=13, anchor="w",
+            ).pack(side="left")
+            entry = tk.Entry(row, bg="#2a2a33", fg=fg, insertbackground=fg, font=("Segoe UI", 9), bd=0)
+            entry.insert(0, current_value)
+            entry.pack(side="left", fill="x", expand=True, ipady=4)
+            return entry
+
+        hotkey_entry = hotkey_row(content, "Show/hide", self.settings["hotkey"])
+        screenshot_entry = hotkey_row(content, "Screenshot", self.settings["screenshot_hotkey"])
+        tk.Label(
+            content, text="e.g. ctrl+shift+space -- restart may be needed if it doesn't take effect live",
+            bg=bg, fg="#6f6f78", font=("Segoe UI", 7), anchor="w", wraplength=300, justify="left",
+        ).pack(fill="x", pady=(2, 0))
+
+        status_lbl = tk.Label(
+            content, text="", bg=bg, fg="#ff6b6b", font=("Segoe UI", 8),
+            anchor="w", wraplength=300, justify="left",
+        )
+        status_lbl.pack(fill="x", pady=(8, 0))
+
+        def do_save():
+            new_hotkey = hotkey_entry.get().strip().lower()
+            new_screenshot_hotkey = screenshot_entry.get().strip().lower()
+            if not new_hotkey or not new_screenshot_hotkey:
+                status_lbl.config(text="Hotkeys can't be empty.")
+                return
+            if new_hotkey == new_screenshot_hotkey:
+                status_lbl.config(text="The two hotkeys can't be the same.")
+                return
+
+            hotkeys_changed = (
+                new_hotkey != self.settings["hotkey"]
+                or new_screenshot_hotkey != self.settings["screenshot_hotkey"]
+            )
+            self.settings["model"] = model_var.get()
+            self.settings["effort"] = effort_var.get()
+            self.settings["hotkey"] = new_hotkey
+            self.settings["screenshot_hotkey"] = new_screenshot_hotkey
+
+            if hotkeys_changed:
+                try:
+                    self._reregister_hotkeys()
+                    self.screenshot_hotkey_lbl.config(text=format_hotkey_display(new_screenshot_hotkey))
+                except Exception as exc:
+                    status_lbl.config(text=f"Hotkey registration failed: {exc}")
+                    return
+
+            save_settings(self.settings)
+            do_close()
+
+        footer = tk.Frame(content, bg=bg)
+        footer.pack(fill="x", pady=(14, 0), side="bottom")
+        save_btn = tk.Label(
+            footer, text="Save", bg=accent, fg="white",
+            font=("Segoe UI", 9, "bold"), padx=14, pady=6, cursor="hand2",
+        )
+        save_btn.pack(side="right")
+        save_btn.bind("<Button-1>", lambda e: do_save())
+
+    # ---------- first-run tips ----------
+
+    def _show_first_run_tips(self):
+        bg, bg_dark, fg, accent = "#1e1e24", "#141419", "#e8e8ec", "#7c5cff"
+
+        win = tk.Toplevel(self.root, bg=bg)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        # Stay hidden and unsized while content is built -- a hardcoded
+        # height here previously left the footer/Got-it-button silently
+        # unmapped by pack() whenever the tip list got taller than the
+        # guessed number (the window's *explicit* geometry() size wins over
+        # pack()'s natural sizing, so anything that doesn't fit just isn't
+        # drawn, no error). Sized for real below, from actual content.
+        win.withdraw()
+        w = 380
+
+        outer = tk.Frame(win, bg=accent)
+        outer.pack(fill="both", expand=True)
+        card = tk.Frame(outer, bg=bg)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+
+        titlebar = tk.Frame(card, bg=bg_dark, height=32)
+        titlebar.pack(fill="x")
+        titlebar.pack_propagate(False)
+        tk.Label(
+            titlebar, text="Welcome to Claude WoW Overlay", bg=bg_dark, fg=fg,
+            font=("Segoe UI", 10, "bold"), padx=10,
+        ).pack(side="left")
+
+        content = tk.Frame(card, bg=bg)
+        content.pack(fill="both", expand=True, padx=18, pady=14)
+
+        tips = [
+            (format_hotkey_display(self.settings["hotkey"]),
+             "Show or hide the box, from anywhere -- even with WoW focused."),
+            (format_hotkey_display(self.settings["screenshot_hotkey"]),
+             "Ask about what's on your screen right now (quest reward "
+             "choices, a tooltip you're hovering, anything visual)."),
+            ("Right-click \U0001F4F7", "Drag-select just part of the screen "
+             "instead of sending the whole desktop -- good for cropping out "
+             "a comparison tooltip."),
+            ("\U0001F4CD button", "Appears when Claude gives you a specific map "
+             "location -- click it, then paste in WoW chat to drop a waypoint."),
+            ("⚙ gear icon", "Change the model, effort level, or either "
+             "hotkey, next to \"Claude\" in the title bar."),
+            ("Tray icon", "Claude keeps running in the system tray when "
+             "hidden -- right-click it for Show/Hide, New, Settings, or Quit."),
+            ("✕ vs Quit", "✕ just hides the box (same as the hotkey). "
+             "\"Quit\" next to the title actually exits."),
+        ]
+        for label, desc in tips:
+            row = tk.Frame(content, bg=bg)
+            row.pack(fill="x", pady=5)
+            tk.Label(
+                row, text=label, bg=bg, fg=accent, font=("Segoe UI", 9, "bold"),
+                anchor="w", width=14, wraplength=110, justify="left",
+            ).pack(side="left", anchor="n")
+            tk.Label(
+                row, text=desc, bg=bg, fg="#c8c8ce", font=("Segoe UI", 9),
+                anchor="w", wraplength=210, justify="left",
+            ).pack(side="left", fill="x", expand=True)
+
+        def dismiss():
+            self.settings["seen_first_run_tips"] = True
+            save_settings(self.settings)
+            win.destroy()
+
+        footer = tk.Frame(content, bg=bg)
+        footer.pack(fill="x", side="bottom", pady=(10, 0))
+        got_it_btn = tk.Label(
+            footer, text="Got it", bg=accent, fg="white",
+            font=("Segoe UI", 9, "bold"), padx=16, pady=6, cursor="hand2",
+        )
+        got_it_btn.pack(side="right")
+        got_it_btn.bind("<Button-1>", lambda e: dismiss())
+
+        # Size the window to what the content actually needs, now that all
+        # of it exists -- avoids ever again silently clipping the footer off
+        # a fixed-height guess when the tip list changes.
+        win.update_idletasks()
+        h = min(outer.winfo_reqheight(), win.winfo_screenheight() - 80)
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 3}")
+        win.deiconify()
+
+        self.show()
 
     def _on_hotkey(self):
         # fires on keyboard library's own thread -- hop back to the Tk thread
@@ -1008,6 +1506,15 @@ class ClaudeOverlay:
                 elif action == "done":
                     self._end_streaming_answer()
                     self._set_busy(False)
+                    self._notify_if_hidden()
+                elif action == "tray_toggle":
+                    self.toggle()
+                elif action == "tray_new":
+                    self.new_conversation()
+                    self.show()
+                elif action == "tray_settings":
+                    self.show()
+                    self._open_settings_dialog()
         except queue.Empty:
             pass
         self.root.after(100, self._drain_ui_queue)
@@ -1040,13 +1547,75 @@ class ClaudeOverlay:
         self.root.withdraw()
 
     def quit(self):
-        for hk in (HOTKEY, SCREENSHOT_HOTKEY):
+        try:
+            self.settings["window_x"] = self.root.winfo_x()
+            self.settings["window_y"] = self.root.winfo_y()
+            self.settings["window_w"] = self.root.winfo_width()
+            self.settings["window_h"] = self.root.winfo_height()
+            save_settings(self.settings)
+        except Exception:
+            pass
+        for hk in (self._active_hotkey, self._active_screenshot_hotkey):
             try:
                 keyboard.remove_hotkey(hk)
             except Exception:
                 pass
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
         self.root.destroy()
         os._exit(0)
+
+    # ---------- system tray ----------
+
+    def _fallback_tray_image(self):
+        """Only used if icon.ico is somehow missing next to the exe -- a
+        plain accent-colored dot beats pystray refusing to start at all."""
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        ImageDraw.Draw(img).ellipse((4, 4, 60, 60), fill=(124, 92, 255, 255))
+        return img
+
+    def _setup_tray_icon(self):
+        icon_path = _icon_path()
+        try:
+            image = Image.open(icon_path) if icon_path else self._fallback_tray_image()
+        except Exception:
+            image = self._fallback_tray_image()
+
+        # Callbacks below run on pystray's own background thread, never the
+        # Tk main thread -- Tkinter widgets aren't thread-safe, so (same
+        # pattern as the global hotkey handlers) every one just pushes an
+        # action onto ui_queue and lets _drain_ui_queue apply it on the main
+        # thread instead of touching self.root directly.
+        menu = pystray.Menu(
+            pystray.MenuItem(
+                "Show / Hide", lambda: self.ui_queue.put(("tray_toggle", None)),
+                default=True,
+            ),
+            pystray.MenuItem("New conversation", lambda: self.ui_queue.put(("tray_new", None))),
+            pystray.MenuItem("Settings...", lambda: self.ui_queue.put(("tray_settings", None))),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", lambda: self.ui_queue.put(("quit", None))),
+        )
+        self.tray_icon = pystray.Icon("ClaudeWowOverlay", image, "Claude WoW Overlay", menu)
+        try:
+            self.tray_icon.run_detached()
+        except Exception as exc:
+            self._append_answer(f"[tray icon failed to start] {exc}", tag="error")
+            self.tray_icon = None
+
+    def _notify_if_hidden(self):
+        """Best-effort badge that an answer is ready -- only worth a toast if
+        the player can't already see it (i.e. the box is currently hidden)."""
+        if self.tray_icon is None:
+            return
+        try:
+            if self.root.state() == "withdrawn":
+                self.tray_icon.notify("Claude has an answer ready.", "Claude WoW Overlay")
+        except Exception:
+            pass
 
     # ---------- conversation ----------
 
@@ -1191,6 +1760,116 @@ class ClaudeOverlay:
 
         self._start_query(question, screenshot_path=screenshot_path)
 
+    def ask_about_screen_region(self):
+        """Same idea as ask_about_screen(), but lets the player drag-select
+        just part of the screen first -- e.g. to crop out just the item
+        comparison tooltip instead of sending the whole cluttered desktop."""
+        if self.busy:
+            return
+        question = self.input_entry.get().strip() or (
+            "Look at what's on my screen right now and help me decide what to do."
+        )
+        self.input_entry.delete(0, "end")
+
+        self.root.withdraw()
+        self.root.update()
+        time.sleep(0.15)
+
+        try:
+            full_img = ImageGrab.grab(all_screens=True)
+        except Exception as exc:
+            self.show()
+            self._append_answer(f"Claude: [error] couldn't take a screenshot: {exc}", tag="error")
+            return
+
+        box = self._select_region()
+        if box is None:
+            self.show()
+            return
+
+        vx, vy, _, _ = _virtual_screen_bounds()
+        x0, y0, x1, y1 = box
+        try:
+            region_img = _downscale_if_huge(full_img.crop((x0 - vx, y0 - vy, x1 - vx, y1 - vy)))
+            screenshot_path = _save_screenshot(region_img)
+        except Exception as exc:
+            self.show()
+            self._append_answer(f"Claude: [error] couldn't take a screenshot: {exc}", tag="error")
+            return
+
+        self.show()
+        self._start_query(question, screenshot_path=screenshot_path)
+
+    def _select_region(self):
+        """A fullscreen, semi-transparent drag-to-select overlay. Blocks
+        (via wait_window) until the player finishes a drag or cancels with
+        Escape. Returns (x0, y0, x1, y1) in absolute screen coordinates, or
+        None if cancelled / the drag was too small to be intentional."""
+        vx, vy, vw, vh = _virtual_screen_bounds()
+
+        sel = tk.Toplevel(self.root)
+        sel.overrideredirect(True)
+        sel.geometry(f"{vw}x{vh}+{vx}+{vy}")
+        sel.attributes("-topmost", True)
+        try:
+            sel.attributes("-alpha", 0.25)
+        except tk.TclError:
+            pass
+        sel.configure(bg="#000000")
+
+        canvas = tk.Canvas(sel, bg="#000000", highlightthickness=0, cursor="crosshair")
+        canvas.pack(fill="both", expand=True)
+
+        hint = tk.Label(
+            sel, text="Drag to select a region for Claude to look at -- Esc to cancel",
+            bg="#1e1e24", fg="#e8e8ec", font=("Segoe UI", 10), padx=10, pady=4,
+        )
+        hint.place(relx=0.5, y=24, anchor="n")
+
+        state = {"start": None, "rect": None, "result": None}
+
+        def on_press(event):
+            state["start"] = (event.x_root, event.y_root)
+            state["rect"] = canvas.create_rectangle(
+                event.x, event.y, event.x, event.y, outline="#7c5cff", width=2,
+            )
+
+        def on_drag(event):
+            if state["rect"] is None:
+                return
+            x0, y0 = state["start"]
+            canvas.coords(
+                state["rect"], x0 - vx, y0 - vy, event.x_root - vx, event.y_root - vy,
+            )
+
+        def finish(result):
+            state["result"] = result
+            sel.destroy()
+
+        def on_release(event):
+            if state["start"] is None:
+                finish(None)
+                return
+            x0, y0 = state["start"]
+            x1, y1 = event.x_root, event.y_root
+            box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            # A sub-8px drag is almost certainly an accidental click, not a
+            # deliberate selection -- treat it as a cancel.
+            if box[2] - box[0] < 8 or box[3] - box[1] < 8:
+                finish(None)
+            else:
+                finish(box)
+
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        sel.bind("<Escape>", lambda e: finish(None))
+
+        sel.focus_force()
+        sel.grab_set()
+        self.root.wait_window(sel)
+        return state["result"]
+
     def _start_query(self, question, screenshot_path=None):
         if self.claude_exe is None:
             self._append_answer(
@@ -1211,6 +1890,19 @@ class ClaudeOverlay:
         thread.start()
 
     def _run_claude(self, question: str, screenshot_path=None):
+        self.ui_queue.put(("status", "Checking connection..."))
+        if not _internet_available():
+            self.ui_queue.put((
+                "answer",
+                (
+                    "Claude: [offline] Can't reach Claude's servers -- check "
+                    "your internet connection and try again.",
+                    "error",
+                ),
+            ))
+            self.ui_queue.put(("done", None))
+            return
+
         # The context block goes in the per-turn PROMPT, not
         # --append-system-prompt: on a --resume call the CLI silently ignores
         # a new system prompt (it only applies when a session is first
@@ -1227,8 +1919,8 @@ class ClaudeOverlay:
             "-p", full_prompt,
             "--restricted",
             "--allowedTools", "WebSearch,Read",
-            "--model", MODEL,
-            "--effort", EFFORT,
+            "--model", self.settings["model"],
+            "--effort", self.settings["effort"],
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
@@ -1330,11 +2022,25 @@ class ClaudeOverlay:
                 or stderr_text
                 or "no response from claude.exe"
             )
-            if "not logged in" in msg.lower() or "invalid bearer" in msg.lower():
+            msg_lower = msg.lower()
+            if "not logged in" in msg_lower or "invalid bearer" in msg_lower:
                 msg += (
                     "\n\nRun `claude setup-token` in a terminal and update "
                     "CLAUDE_CODE_OAUTH_TOKEN with the new token."
                 )
+            elif any(p in msg_lower for p in (
+                "rate limit", "rate_limit", "429", "overloaded", "usage limit",
+                "quota",
+            )):
+                msg += (
+                    "\n\nClaude is rate-limiting or over quota right now -- "
+                    "wait a bit and try again."
+                )
+            elif any(p in msg_lower for p in (
+                "network", "connection", "timed out", "timeout",
+                "temporary failure", "getaddrinfo", "econnrefused", "enotfound",
+            )):
+                msg += "\n\nThis looks like a network problem -- check your connection and try again."
             if answer_started:
                 self.ui_queue.put(("answer_chunk", f"\n\n[error] {msg}"))
             else:
@@ -1380,5 +2086,23 @@ class ClaudeOverlay:
 
 
 if __name__ == "__main__":
-    app = ClaudeOverlay()
-    app.run()
+    try:
+        app = ClaudeOverlay()
+        app.run()
+    except Exception:
+        # Catches failures before report_callback_exception is even wired up
+        # (e.g. Tk itself failing to init) -- without this, a --windowed exe
+        # just vanishes with no window and no console, which for a guild of
+        # non-technical users looks exactly like "nothing happened."
+        _log_crash(*sys.exc_info())
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "Claude WoW Overlay hit an unexpected error and had to close.\n\n"
+                f"Details were saved to:\n{CRASH_LOG_PATH}",
+                "Claude WoW Overlay -- crashed",
+                0x10,  # MB_ICONERROR
+            )
+        except Exception:
+            pass
+        sys.exit(1)
