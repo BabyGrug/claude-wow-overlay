@@ -97,7 +97,7 @@ WINDOW_W, WINDOW_H = 460, 360
 MODEL = "sonnet"
 EFFORT = "medium"
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 UPDATE_REPO = "BabyGrug/claude-wow-overlay"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ClaudeWowOverlaySetup.exe"
@@ -731,15 +731,23 @@ class ClaudeOverlay:
         new_btn.bind("<Enter>", lambda e: new_btn.config(fg=accent))
         new_btn.bind("<Leave>", lambda e: new_btn.config(fg="#9a9aa2"))
 
-        # Hidden until check_for_update() (kicked off in __init__) actually
-        # finds something -- no update most of the time, so nothing should
-        # show by default. See _show_update_button.
+        # Shows the running version by default (dim, not clickable); becomes
+        # a live "Update to vX" button once check_for_update() (kicked off in
+        # __init__) actually finds something newer. See _show_update_button.
+        self._update_available = False
         self.update_btn = tk.Label(
-            titlebar, bg="#141419", fg="#4caf50",
-            font=("Segoe UI", 9, "bold"), padx=8, cursor="hand2",
+            titlebar, text=f"v{APP_VERSION}", bg="#141419", fg="#6f6f78",
+            font=("Segoe UI", 9, "bold"), padx=8,
         )
-        self.update_btn.bind("<Enter>", lambda e: self.update_btn.config(fg="white"))
-        self.update_btn.bind("<Leave>", lambda e: self.update_btn.config(fg="#4caf50"))
+        self.update_btn.pack(side="right")
+        self.update_btn.bind(
+            "<Enter>",
+            lambda e: self.update_btn.config(fg="white") if self._update_available else None,
+        )
+        self.update_btn.bind(
+            "<Leave>",
+            lambda e: self.update_btn.config(fg="#4caf50") if self._update_available else None,
+        )
 
         for widget in (titlebar, title_lbl):
             widget.bind("<ButtonPress-1>", self._start_drag)
@@ -900,18 +908,21 @@ class ClaudeOverlay:
 
     def _show_update_button(self, payload):
         latest, download_url = payload
-        self.update_btn.config(text=f"⬆ Update to v{latest}")
-        self.update_btn.bind("<Button-1>", lambda e: self._start_update(download_url))
-        self.update_btn.pack(side="right")
+        self._update_available = True
+        self.update_btn.config(text=f"⬆ Update to v{latest}", fg="#4caf50", cursor="hand2")
+        self.update_btn.bind("<Button-1>", lambda e: self._start_update(latest, download_url))
 
-    def _start_update(self, download_url):
+    def _start_update(self, latest, download_url):
         if self.busy:
             return
+        self._update_available = False
         self.update_btn.unbind("<Button-1>")
-        self.update_btn.config(text="Downloading update...", cursor="")
-        threading.Thread(target=self._download_and_install_update, args=(download_url,), daemon=True).start()
+        self.update_btn.config(text="Downloading update...", cursor="", fg="#4caf50")
+        threading.Thread(
+            target=self._download_and_install_update, args=(latest, download_url), daemon=True,
+        ).start()
 
-    def _download_and_install_update(self, download_url):
+    def _download_and_install_update(self, latest, download_url):
         installer_path = os.path.join(os.environ.get("TEMP", "."), UPDATE_ASSET_NAME)
         max_attempts = 6
         last_error = None
@@ -955,12 +966,17 @@ class ClaudeOverlay:
                 "answer",
                 (f"Claude: [update failed after {max_attempts} attempts] {last_error}", "error"),
             ))
+            # Restore the clickable "Update to vX" state (rather than leaving
+            # it stuck on "Downloading update...") so retrying doesn't need a
+            # full app restart.
+            self.ui_queue.put(("update_available", (latest, download_url)))
             self.ui_queue.put(("done", None))
             return
         try:
             subprocess.Popen([installer_path])
         except Exception as exc:
             self.ui_queue.put(("answer", (f"Claude: [update downloaded but failed to launch] {exc}", "error")))
+            self.ui_queue.put(("update_available", (latest, download_url)))
             self.ui_queue.put(("done", None))
             return
         self.ui_queue.put(("quit", None))
