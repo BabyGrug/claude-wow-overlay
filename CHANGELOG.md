@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.5
+- Fixed the addon showing "Incompatible" and never loading on Retail. The
+  guessed Retail interface range from v1.2.1 (110000-110207) was wrong --
+  confirmed directly that a real Retail client is on interface 120100, via
+  `/run print(select(4, GetBuildInfo()))`. Updated the TOC to the real
+  number. If you saw "Incompatible" in the AddOns list before, a `/reload`
+  after this update should fix it.
+
 ## v1.2.4
 - Fixed Claude flatly refusing questions about a different WoW version than
   whichever one your conversation happened to start on -- e.g. asking about

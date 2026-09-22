@@ -1,16 +1,22 @@
-## Interface: 16000, 16001, 11507, 11508, 11509, 11510, 40400, 40401, 40402, 40403, 50500, 50501, 50502, 110000, 110100, 110200, 110205, 110207
+## Interface: 16000, 16001, 11507, 11508, 11509, 11510, 40400, 40401, 40402, 40403, 50500, 50501, 50502, 120100, 120101, 120102, 120103, 120104, 120105
 ## Title: Claude Context
 ## Notes: Writes your character, location and quest log to disk so the Claude overlay app can use it as context. No network access, no automation -- just a SavedVariables dump.
 ## Author: You
-## Version: 1.1.0
+## Version: 1.2.0
 ## SavedVariablesPerCharacter: ClaudeContextDB
 
 # The list above covers WoW Forever, Classic Era, Cataclysm Classic, Mists
-# of Pandaria Classic and current Retail as of when this was written -- it
-# WILL drift as each gets patched, same as any other addon. If this addon
-# shows greyed-out/"out of date" in the AddOns list after a patch, either
-# check "Load out of date AddOns" there as an immediate workaround, or add
-# that client's exact interface number here (Interface/AddOns list shows it,
-# or /dump select(4, GetBuildInfo())).
+# of Pandaria Classic and Retail as of when this was written -- it WILL
+# drift as each gets patched, same as any other addon. The old guessed
+# Retail range (110000-110207) turned out to be wrong -- confirmed directly
+# that a real Retail client is actually on 120100 (via
+# /run print(select(4, GetBuildInfo())), not a guess -- showed up as
+# "Incompatible" in the AddOns list until this was corrected. A few nearby
+# numbers are padded in above for near-term point patches, but there's no
+# reliable way to predict Blizzard's future numbering beyond that. If this
+# addon shows greyed-out/"Incompatible" in the AddOns list after a patch:
+# check "Load out of date AddOns" there as an immediate workaround, and get
+# the exact number via that same /run command (or the AddOns list itself,
+# which shows it) and add it here.
 
 ClaudeContext.lua

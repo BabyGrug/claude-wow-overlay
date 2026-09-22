@@ -370,17 +370,22 @@ notes, code comments, etc.
   equivalent exists, or it's a bigger fork into API-key-based auth (a real,
   different design decision, not a small addition).
 - **Multi-flavor support (Retail/Classic/Classic Era) shipped in v1.2.x
-  but is unverified beyond WoW Forever** -- there's no Retail or Classic
-  client on this machine to test against, unlike Forever which has been
-  verified repeatedly against a live client and QuestMaster's source. The
-  legacy quest-log fallback (`CollectQuestsLegacy`), the `GetGameFlavor()`
-  detection, and the TOC's non-Forever interface numbers are all built from
-  general WoW API knowledge and defensive coding (try modern API, fall back
-  to legacy, degrade to empty/nil rather than crash) but genuinely need the
-  user's own real-world testing to confirm, the same way Forever's bugs
-  (`GetItemInfo` nil, the login-sync timing race) only ever got found and
-  fixed through live testing, not guessing. If the user reports Retail/
-  Classic-specific issues, don't assume the API guess was right -- ask for
-  a `/run` diagnostic the way gotcha #17/#18 did, don't just guess again.
+  but is still only partially verified** -- there's no Retail or Classic
+  client on this machine to test against directly, unlike Forever which has
+  been verified repeatedly against a live client and QuestMaster's source;
+  all verification for other flavors has to happen through the user's own
+  real client. One real bug already found and fixed this way: the guessed
+  Retail interface range (110000-110207) was wrong -- the user's actual
+  Retail client is on 120100 (confirmed via
+  `/run print(select(4, GetBuildInfo()))`), which made the addon show
+  "Incompatible" and never load at all, so nothing else about Retail could
+  even be tested until that was fixed in v1.2.5. The legacy quest-log
+  fallback (`CollectQuestsLegacy`) and whether a sync actually succeeds
+  end-to-end with correct data on Retail/Classic are still unconfirmed. If
+  the user reports Retail/Classic-specific issues, don't assume the API
+  guess was right -- ask for a `/run` diagnostic the way gotcha #17/#18/this
+  one did, don't just guess again. Interface numbers specifically WILL keep
+  drifting with every Retail/Classic patch -- that's normal addon
+  maintenance, not a one-time fix.
 - Versioning is semantic (vMAJOR.MINOR.PATCH) by default; revisit if the
   user asks for something simpler.
