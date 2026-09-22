@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.2.1
+- The setup wizard now finds *every* WoW install on your machine (WoW
+  Forever, Retail, Classic, Classic Era) and lets you check off which ones
+  to set the addon up in, instead of only ever picking one automatically.
+  Uninstalling and updating both clean up/refresh every install you chose.
+- The addon now records which WoW version it's running on and tells Claude
+  explicitly, so it can't confidently answer a Retail question off stale
+  Classic data (or vice versa) without at least flagging the mismatch.
+- Added a defensive legacy quest-log fallback and widened the addon's
+  supported interface versions for Classic Era/Classic/Retail.
+- **Retail and Classic support is best-effort and not yet verified against
+  a real client** (only WoW Forever has been -- repeatedly, and only ever
+  by actually testing, not guessing). If something doesn't work right on
+  Retail/Classic, that's expected until it gets real testing -- same as
+  every Forever bug fixed so far.
+- Settings now has a "Manage WoW installs..." link that reopens the setup
+  tool's WoW picker directly (skipping the already-done prerequisite/login
+  steps), so you can add a flavor you skipped the first time without a
+  fresh download.
+
 ## v1.2.0
 - Conversations now persist across closing and reopening the app (including
   an update's own relaunch) -- previously every restart silently started a

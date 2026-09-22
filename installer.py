@@ -7,9 +7,11 @@ own dark/purple look. Walks a completely non-technical user through:
      this app calls its bundled CLI directly, using the user's own login,
      which is also *why* nothing the user asks ever passes through us).
   2. Getting them logged in (claude setup-token), if not already.
-  3. Finding their WoW Forever install (or letting them point at it).
-  4. Copying the compiled overlay + the ClaudeContext addon into place,
-     and creating a Start Menu shortcut.
+  3. Finding their WoW install(s) -- WoW Forever, Retail, Classic, Classic
+     Era, whichever are present -- and letting them pick which to set the
+     addon up in (or point at one manually).
+  4. Copying the compiled overlay + the ClaudeContext addon into place for
+     each selected install, and creating a Start Menu shortcut.
 
 Bundled payload (see payload/ next to this script, or inside the compiled
 exe under sys._MEIPASS/payload/ once built with build_installer.py):
@@ -46,7 +48,7 @@ WINDOW_W, WINDOW_H = 560, 460
 
 # Bump alongside overlay.py's APP_VERSION -- shown in Windows' "Apps &
 # Features" listing via the registry uninstall entry (see register_uninstaller).
-INSTALLER_VERSION = "1.2.0"
+INSTALLER_VERSION = "1.2.1"
 
 UNINSTALL_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWowOverlay"
 
@@ -113,10 +115,26 @@ def test_login(claude_exe, token=None):
     return False, (result.stderr or result.stdout or "unknown error").strip()
 
 
-def find_wow_forever_installs():
-    """Every WoW build folder that looks like WoW Forever specifically
-    (interface 16000-19999, per ClaudeContext's own VersionDetect logic),
-    across both Program Files roots. Returns a list of AddOns folder paths."""
+# Blizzard's launcher names each flavor's own build folder consistently, but
+# WoW Forever is the one exception -- it's been observed running out of a
+# plain "_classic_beta_" folder, indistinguishable by name alone from any
+# OTHER beta that might use the same name at a different time. The
+# lastAddonVersion/interface-range check below (16000-19999, matching
+# ClaudeContext.lua's own GetGameFlavor()) is what actually tells Forever
+# apart -- confirmed directly against a live Forever client, not guessed.
+_FLAVOR_FOLDER_LABELS = {
+    "_retail_": "Retail",
+    "_classic_era_": "Classic Era",
+    "_classic_": "Classic",
+}
+_FLAVOR_PRIORITY = {"WoW Forever": 0, "Retail": 1, "Classic": 2, "Classic Era": 3}
+
+
+def find_wow_installs():
+    """Every WoW build folder found across both Program Files roots, each
+    labeled with its flavor. Returns a list of (addons_path, flavor_label)
+    tuples, WoW Forever first, then Retail/Classic/Classic Era, then
+    anything else found (PTR/beta builds, unrecognized folder names)."""
     roots = []
     for env_var, default in (("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
                               ("PROGRAMFILES", r"C:\Program Files")):
@@ -132,6 +150,7 @@ def find_wow_forever_installs():
             addons_path = os.path.join(build_dir, "Interface", "AddOns")
             if not os.path.isdir(addons_path):
                 continue
+
             is_forever = False
             if os.path.isfile(config_path):
                 try:
@@ -142,10 +161,17 @@ def find_wow_forever_installs():
                         is_forever = True
                 except Exception:
                     pass
-            found.append((addons_path, is_forever))
 
-    # Forever installs first
-    found.sort(key=lambda pair: not pair[1])
+            if is_forever:
+                label = "WoW Forever"
+            else:
+                folder_name = os.path.basename(build_dir).lower()
+                label = _FLAVOR_FOLDER_LABELS.get(folder_name)
+                if not label:
+                    label = folder_name.strip("_").replace("_", " ").title() or "WoW"
+            found.append((addons_path, label))
+
+    found.sort(key=lambda pair: _FLAVOR_PRIORITY.get(pair[1], 99))
     return found
 
 
@@ -185,10 +211,12 @@ def register_uninstaller(install_dir, uninstall_string, icon_dst):
             winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, size_kb)
 
 
-def install_everything(addons_path, progress_cb):
+def install_everything(addons_paths, progress_cb):
     """Copies the overlay + addon into place and creates a Start Menu
-    shortcut. progress_cb(str) is called with a short status after each step.
-    Returns (ok, message)."""
+    shortcut. addons_paths is a list of WoW AddOns folders (possibly empty)
+    to install the ClaudeContext addon into -- one WoW install per flavor
+    the player wants it working in. progress_cb(str) is called with a short
+    status after each step. Returns (ok, message)."""
     try:
         install_dir = os.path.join(os.environ["LOCALAPPDATA"], "ClaudeWowOverlay")
         os.makedirs(install_dir, exist_ok=True)
@@ -213,11 +241,12 @@ def install_everything(addons_path, progress_cb):
             except OSError:
                 setup_exe_dst = None
 
-        # Remembered so the uninstaller can find and remove the WoW addon
-        # folder too, without re-asking the user where WoW is installed.
+        # Remembered so the uninstaller/quiet-updater can find and refresh
+        # the WoW addon folder(s) too, without re-asking the user where WoW
+        # is installed each time.
         try:
             with open(os.path.join(install_dir, "install_info.json"), "w", encoding="utf-8") as f:
-                json.dump({"addons_path": addons_path}, f)
+                json.dump({"addons_paths": list(addons_paths or [])}, f)
         except OSError:
             pass
 
@@ -229,13 +258,17 @@ def install_everything(addons_path, progress_cb):
             except OSError:
                 pass  # a missing "Apps & Features" entry shouldn't fail the install
 
-        if addons_path:
-            progress_cb("Installing the WoW addon...")
-            addon_dst = os.path.join(addons_path, "ClaudeContext")
-            os.makedirs(addon_dst, exist_ok=True)
-            for fname in ("ClaudeContext.toc", "ClaudeContext.lua"):
-                shutil.copy2(resource_path("ClaudeContext", fname),
-                             os.path.join(addon_dst, fname))
+        if addons_paths:
+            progress_cb(
+                f"Installing the WoW addon ({len(addons_paths)} install"
+                f"{'s' if len(addons_paths) != 1 else ''})..."
+            )
+            for addons_path in addons_paths:
+                addon_dst = os.path.join(addons_path, "ClaudeContext")
+                os.makedirs(addon_dst, exist_ok=True)
+                for fname in ("ClaudeContext.toc", "ClaudeContext.lua"):
+                    shutil.copy2(resource_path("ClaudeContext", fname),
+                                 os.path.join(addon_dst, fname))
 
         progress_cb("Creating Start Menu shortcut...")
         shortcut_path = os.path.join(
@@ -279,7 +312,7 @@ def launch_setup_token_terminal(claude_exe):
 # ============================================================================
 
 class InstallerApp:
-    def __init__(self):
+    def __init__(self, skip_welcome=False):
         self.root = tk.Tk()
         self.root.title("Claude WoW Overlay Setup")
         self.root.configure(bg=BG)
@@ -296,13 +329,22 @@ class InstallerApp:
         self.root.geometry(f"+{(sw - WINDOW_W) // 2}+{(sh - WINDOW_H) // 3}")
 
         self.claude_exe = None
-        self.selected_addons_path = None
+        self.selected_addons_paths = []
         self.wow_installs = []
 
         self.content = tk.Frame(self.root, bg=BG)
         self.content.pack(fill="both", expand=True)
 
-        self._page_welcome()
+        if skip_welcome:
+            # Launched from the overlay's own Settings dialog ("Manage WoW
+            # installs...") on an already-installed machine -- Claude is
+            # obviously already installed/logged in at that point, so jump
+            # straight to the same prerequisite-check page the normal flow
+            # uses (its own animated checks still run, just without making
+            # the user click through Welcome first).
+            self._page_checking()
+        else:
+            self._page_welcome()
 
     def _clear(self):
         for widget in self.content.winfo_children():
@@ -346,7 +388,8 @@ class InstallerApp:
         self._clear()
         self._header(
             "Claude WoW Overlay",
-            "A floating AI assistant for World of Warcraft: Forever -- press "
+            "A floating AI assistant for World of Warcraft -- works with "
+            "WoW Forever, Retail, Classic, and Classic Era. Press "
             "Ctrl+Shift+Space anytime to ask it about quests, zones, "
             "professions, or anything else, and it knows your character, "
             "location and quest log automatically.",
@@ -387,7 +430,7 @@ class InstallerApp:
         for key, label in [
             ("claude", "Claude desktop app"),
             ("login", "Signed in to Claude"),
-            ("wow", "World of Warcraft: Forever"),
+            ("wow", "World of Warcraft"),
         ]:
             row = tk.Frame(checks_frame, bg=BG)
             row.pack(fill="x", pady=6)
@@ -420,7 +463,7 @@ class InstallerApp:
             logged_in, _ = test_login(self.claude_exe)
         self._set_check("login", logged_in)
 
-        self.wow_installs = find_wow_forever_installs()
+        self.wow_installs = find_wow_installs()
         self._set_check("wow", len(self.wow_installs) > 0)
 
         self.root.after(600, lambda: self._checks_done(logged_in))
@@ -526,35 +569,67 @@ class InstallerApp:
                 fg=RED,
             )
 
-    # ---------- Page 3: confirm / pick WoW install ----------
+    # ---------- Page 3: confirm / pick WoW install(s) ----------
 
     def _page_wow_confirm(self):
         self._clear()
-        if self.wow_installs:
-            self.selected_addons_path = self.wow_installs[0][0]
-            self._header(
-                "Found World of Warcraft: Forever",
-                self.selected_addons_path.replace("\\Interface\\AddOns", ""),
+        self._header(
+            "Which WoW installs should the addon go in?",
+            "Lets Claude see your character, location and quest log "
+            "automatically in each one you check. The overlay app itself "
+            "works fine either way -- this only affects whether it can see "
+            "your live game state.",
+        )
+
+        self.wow_checkboxes = []
+        list_frame = tk.Frame(self.content, bg=BG)
+        list_frame.pack(fill="both", expand=True, padx=32, pady=(0, 8))
+
+        for addons_path, label in self.wow_installs:
+            var = tk.BooleanVar(value=True)
+            row = tk.Frame(list_frame, bg=BG)
+            row.pack(fill="x", pady=4)
+            cb = tk.Checkbutton(
+                row, text=label, variable=var, bg=BG, fg=FG,
+                selectcolor=BG_FIELD, activebackground=BG, activeforeground=FG,
+                font=("Segoe UI", 10, "bold"), anchor="w", highlightthickness=0,
+                bd=0,
             )
-            footer = tk.Frame(self.content, bg=BG)
-            footer.pack(side="bottom", fill="x", padx=32, pady=24)
-            self._button(footer, "Install \u2192", self._page_installing).pack(side="right")
-            self._button(footer, "Choose a different folder", self._browse_wow,
-                          primary=False).pack(side="right", padx=(0, 8))
-        else:
-            self._header(
-                "Couldn't find WoW Forever automatically",
-                "The overlay app itself will still work either way -- this "
-                "only affects whether it can see your character/quest data. "
-                "You can point at your WoW folder manually, or skip this and "
-                "add the addon yourself later.",
-            )
-            footer = tk.Frame(self.content, bg=BG)
-            footer.pack(side="bottom", fill="x", padx=32, pady=24)
-            self._button(footer, "Install without addon \u2192",
-                          self._page_installing).pack(side="right")
-            self._button(footer, "Browse...", self._browse_wow,
-                          primary=False).pack(side="right", padx=(0, 8))
+            cb.pack(side="top", anchor="w")
+            tk.Label(
+                row, text=addons_path.replace("\\Interface\\AddOns", ""),
+                bg=BG, fg=FG_DIM, font=("Segoe UI", 8), anchor="w",
+            ).pack(side="top", anchor="w", padx=(24, 0))
+            self.wow_checkboxes.append((var, addons_path))
+
+        if not self.wow_installs:
+            tk.Label(
+                list_frame,
+                text="Couldn't find any WoW installs automatically. Browse "
+                     "for a folder manually below, or skip this and add the "
+                     "addon yourself later.",
+                bg=BG, fg=FG_DIM, font=("Segoe UI", 9), wraplength=496,
+                justify="left", anchor="w",
+            ).pack(fill="x", pady=8)
+
+        browse_error = getattr(self, "_wow_browse_error", None)
+        if browse_error:
+            tk.Label(
+                list_frame, text=browse_error, bg=BG, fg=RED,
+                font=("Segoe UI", 9), wraplength=496, justify="left", anchor="w",
+            ).pack(fill="x", pady=(4, 0))
+            self._wow_browse_error = None
+
+        footer = tk.Frame(self.content, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=32, pady=24)
+        install_label = "Install \u2192" if self.wow_installs else "Continue without addon \u2192"
+        self._button(footer, install_label, self._confirm_wow_selection).pack(side="right")
+        self._button(footer, "Browse for another folder...", self._browse_wow,
+                      primary=False).pack(side="right", padx=(0, 8))
+
+    def _confirm_wow_selection(self):
+        self.selected_addons_paths = [p for var, p in self.wow_checkboxes if var.get()]
+        self._page_installing()
 
     def _browse_wow(self):
         folder = filedialog.askdirectory(title="Select your World of Warcraft folder")
@@ -562,11 +637,13 @@ class InstallerApp:
             return
         addons_path = os.path.join(folder, "Interface", "AddOns")
         if os.path.isdir(addons_path):
-            self.selected_addons_path = addons_path
-            self._page_installing()
+            if not any(p == addons_path for p, _ in self.wow_installs):
+                self.wow_installs.append((addons_path, "Manually selected"))
         else:
-            self.check_detail_browse_error = True
-            self._header("That doesn't look like a WoW folder", "")
+            self._wow_browse_error = (
+                "That doesn't look like a WoW folder -- no Interface\\AddOns inside it."
+            )
+        self._page_wow_confirm()
 
     # ---------- Page 4: installing ----------
 
@@ -584,7 +661,7 @@ class InstallerApp:
         def progress(text):
             self.root.after(0, lambda: self.install_status.config(text=text))
 
-        ok, result = install_everything(self.selected_addons_path, progress)
+        ok, result = install_everything(self.selected_addons_paths, progress)
         self.root.after(300, lambda: self._page_done(ok, result))
 
     # ---------- Page 5: done ----------
@@ -610,12 +687,12 @@ class InstallerApp:
             wraplength=470, padx=14, pady=12,
         ).pack(fill="x")
 
-        if not self.selected_addons_path:
+        if not self.selected_addons_paths:
             tk.Label(
                 self.content,
-                text="Note: the WoW addon wasn't installed since your game "
-                     "folder wasn't found. The overlay itself works fine "
-                     "without it -- it just won't know your character/quests.",
+                text="Note: the WoW addon wasn't installed into any game "
+                     "folder. The overlay itself works fine without it -- "
+                     "it just won't know your character/quests.",
                 bg=BG, fg=FG_DIM, font=("Segoe UI", 9), wraplength=496,
                 justify="left", anchor="w",
             ).pack(fill="x", padx=32, pady=(0, 8))
@@ -661,24 +738,31 @@ def run_quiet_update() -> bool:
         return False
 
     install_dir = os.path.join(os.environ["LOCALAPPDATA"], "ClaudeWowOverlay")
-    addons_path = None
+    addons_paths = []
     info_path = os.path.join(install_dir, "install_info.json")
     if os.path.isfile(info_path):
         try:
             with open(info_path, "r", encoding="utf-8") as f:
-                addons_path = json.load(f).get("addons_path")
+                info = json.load(f)
+            if "addons_paths" in info:
+                addons_paths = [p for p in (info.get("addons_paths") or []) if p]
+            elif info.get("addons_path"):
+                # Old single-flavor format from before multi-flavor support
+                # (v1.2.0 and earlier) -- still honor it.
+                addons_paths = [info["addons_path"]]
         except (OSError, json.JSONDecodeError):
-            addons_path = None
-    if not addons_path or not os.path.isdir(addons_path):
-        # Missing (an install from before install_info.json existed -- true
-        # for the very first installs this was ever shipped to) or stale
-        # (WoW moved/got reinstalled elsewhere) -- try to rediscover it the
-        # same way a first-time install would, rather than silently giving
-        # up on refreshing the addon.
-        installs = find_wow_forever_installs()
-        addons_path = installs[0][0] if installs else None
+            addons_paths = []
 
-    ok, _ = install_everything(addons_path, lambda msg: None)
+    addons_paths = [p for p in addons_paths if os.path.isdir(p)]
+    if not addons_paths:
+        # Missing (an install from before install_info.json existed at all
+        # -- true for the very first installs this was ever shipped to) or
+        # stale (WoW moved/got reinstalled elsewhere) -- try to rediscover
+        # everything the same way a first-time install would, rather than
+        # silently giving up on refreshing the addon.
+        addons_paths = [p for p, _ in find_wow_installs()]
+
+    ok, _ = install_everything(addons_paths, lambda msg: None)
     if not ok:
         return False
 
@@ -725,8 +809,15 @@ def do_uninstall(progress_cb, install_dir=None, shortcut_path=None):
     progress_cb("Removing the WoW addon...")
     try:
         with open(os.path.join(install_dir, "install_info.json"), "r", encoding="utf-8") as f:
-            addons_path = json.load(f).get("addons_path")
-        if addons_path:
+            info = json.load(f)
+        addons_paths = info.get("addons_paths")
+        if addons_paths is None:
+            # Old single-flavor format from before multi-flavor support.
+            single = info.get("addons_path")
+            addons_paths = [single] if single else []
+        for addons_path in addons_paths:
+            if not addons_path:
+                continue
             addon_dir = os.path.join(addons_path, "ClaudeContext")
             if os.path.isdir(addon_dir):
                 shutil.rmtree(addon_dir, ignore_errors=True)
@@ -855,5 +946,7 @@ if __name__ == "__main__":
     elif "--update" in sys.argv[1:]:
         if not run_quiet_update():
             InstallerApp().run()
+    elif "--manage" in sys.argv[1:]:
+        InstallerApp(skip_welcome=True).run()
     else:
         InstallerApp().run()

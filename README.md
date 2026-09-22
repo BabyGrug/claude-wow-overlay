@@ -1,9 +1,10 @@
 # Claude WoW Overlay
 
-A floating AI assistant for **World of Warcraft: Forever**. Press a hotkey to
-ask Claude about quests, professions, zones, or anything else — it
-automatically knows your character, location, and quest log, and can look at
-your screen when that's more useful than a text description.
+A floating AI assistant for **World of Warcraft** — works with WoW Forever,
+Retail, Classic, and Classic Era. Press a hotkey to ask Claude about quests,
+professions, zones, or anything else — it automatically knows your
+character, location, and quest log, and can look at your screen when that's
+more useful than a text description.
 
 ## Download
 
@@ -19,9 +20,10 @@ Run it and follow the setup wizard — a couple of minutes, mostly automatic.
   else. It goes straight from your machine to your own Claude account.
 - **Your own Claude subscription.** This isn't a shared account — everyone
   who installs it authenticates their own.
-- World of Warcraft: Forever. The companion addon (character/location/quest
-  awareness) is optional but recommended — the installer offers to set it up
-  automatically.
+- World of Warcraft (any of Forever, Retail, Classic, or Classic Era). The
+  companion addon (character/location/quest awareness) is optional but
+  recommended — the installer offers to set it up automatically in whichever
+  install(s) you pick.
 
 ### A note on security warnings
 
@@ -45,9 +47,11 @@ want to check it yourself.
   builds, rotation, profession milestones) so it doesn't need to re-research
   the same question every time, and knows to double-check level-sensitive
   ones as you level up
-- Checks a ranked hierarchy of WoW Forever sources (official Blizzard >
-  Wowhead > Icy Veins > everything else) before falling back to general
-  Classic/Vanilla knowledge — and always tells you when it's doing that
+- Checks a ranked hierarchy of sources (official Blizzard > Wowhead > Icy
+  Veins > everything else) for whichever WoW version you're actually
+  playing, falling back to general Classic/Vanilla knowledge on WoW Forever
+  specifically if nothing Forever-specific turns up — and always tells you
+  when it's doing that
 - Checks for updates on startup and shows a button when a new version is out
 
 ## Updating

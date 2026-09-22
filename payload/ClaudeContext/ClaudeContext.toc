@@ -1,8 +1,16 @@
-## Interface: 16000, 16001, 11508, 11509
+## Interface: 16000, 16001, 11507, 11508, 11509, 11510, 40400, 40401, 40402, 40403, 50500, 50501, 50502, 110000, 110100, 110200, 110205, 110207
 ## Title: Claude Context
 ## Notes: Writes your character, location and quest log to disk so the Claude overlay app can use it as context. No network access, no automation -- just a SavedVariables dump.
 ## Author: You
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariablesPerCharacter: ClaudeContextDB
+
+# The list above covers WoW Forever, Classic Era, Cataclysm Classic, Mists
+# of Pandaria Classic and current Retail as of when this was written -- it
+# WILL drift as each gets patched, same as any other addon. If this addon
+# shows greyed-out/"out of date" in the AddOns list after a patch, either
+# check "Load out of date AddOns" there as an immediate workaround, or add
+# that client's exact interface number here (Interface/AddOns list shows it,
+# or /dump select(4, GetBuildInfo())).
 
 ClaudeContext.lua

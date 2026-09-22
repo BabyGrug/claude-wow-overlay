@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 
 def _icon_path():
@@ -188,6 +188,14 @@ DEFAULT_SETTINGS = {
 
 TRANSCRIPT_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "last_conversation.txt"
+)
+
+# The installer copies itself here during setup (see installer.py's
+# install_everything -- purely so the registry's uninstall entry has
+# something stable to point at). Reused here too, so Settings can relaunch
+# it in --manage mode to add/refresh WoW installs without a fresh download.
+SETUP_EXE_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "ClaudeWowOverlaySetup.exe"
 )
 
 # Model is fixed to Sonnet -- not user-selectable. (value, label) -- label is
@@ -274,26 +282,42 @@ def check_for_update():
     except Exception:
         return None, None
 
-# Ranked, not a flat list -- researched 2026-09-20. Official > Wowhead > Icy
-# Veins > everything else. The tier-4 sites are boosting-service content
-# marketing (lfcarry, skycoach, mmogah, boostroom) plus a couple of smaller
-# community aggregators -- accurate in spot-checks tonight, but no named-author
-# accountability and a commercial incentive to oversell difficulty, so they're
-# backup only, never a first stop. Maxroll.gg was checked and dropped -- no
-# WoW Forever coverage yet, just retail/Midnight. games.gg was checked and
-# dropped -- single uncredentialed author, no source citations.
-WOW_SOURCE_TIER_1_OFFICIAL = [
+# Ranked, not a flat list -- researched 2026-09-20, specifically for WoW
+# Forever. Official > Wowhead > Icy Veins > everything else. The tier-4
+# sites are boosting-service content marketing (lfcarry, skycoach, mmogah,
+# boostroom) plus a couple of smaller community aggregators -- accurate in
+# spot-checks tonight, but no named-author accountability and a commercial
+# incentive to oversell difficulty, so they're backup only, never a first
+# stop. Maxroll.gg was checked and dropped -- no WoW Forever coverage yet,
+# just retail/Midnight. games.gg was checked and dropped -- single
+# uncredentialed author, no source citations.
+WOW_SOURCE_TIER_1_OFFICIAL_FOREVER = [
     "worldofwarcraft.blizzard.com/en-us/forever",
     "us.forums.blizzard.com (WoW Forever category)",
 ]
-WOW_SOURCE_TIER_2_PRIMARY = ["wowhead.com/forever"]
-WOW_SOURCE_TIER_3_SECONDARY = ["icy-veins.com/wow-forever"]
-WOW_SOURCE_TIER_4_BACKUP = [
+WOW_SOURCE_TIER_2_PRIMARY_FOREVER = ["wowhead.com/forever"]
+WOW_SOURCE_TIER_3_SECONDARY_FOREVER = ["icy-veins.com/wow-forever"]
+WOW_SOURCE_TIER_4_BACKUP_FOREVER = [
     "lfcarry.com/guides", "skycoach.gg/blog/wow-forever",
     "mmogah.com/news/wow-forever", "mobalytics.gg/wow-forever",
     "classicwow.gg/forever", "classicwowforever.com", "wowforevertools.com",
     "boostroom.com/blog",
 ]
+
+# Generic equivalents for any OTHER WoW flavor (Retail, Classic Era, or any
+# Classic-progression tier) -- added when multi-flavor support shipped
+# (v1.2.x). Not version-specific paths like the Forever ones above, since
+# Wowhead/Icy Veins/the official site each have their own well-indexed
+# section per flavor and searching the domain generically (plus naming the
+# exact flavor in the query -- see build_system_prompt) finds the right one
+# reliably, unlike Forever which needed the exact path pinned down by hand
+# since it's too new to be well-indexed yet.
+WOW_SOURCE_TIER_1_OFFICIAL_GENERIC = [
+    "worldofwarcraft.blizzard.com", "us.forums.blizzard.com",
+]
+WOW_SOURCE_TIER_2_PRIMARY_GENERIC = ["wowhead.com"]
+WOW_SOURCE_TIER_3_SECONDARY_GENERIC = ["icy-veins.com"]
+WOW_SOURCE_TIER_4_BACKUP_GENERIC = ["mobalytics.gg", "maxroll.gg"]
 
 SCREENSHOTS_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "screenshots"
@@ -368,6 +392,22 @@ LOCATION_TAG_RE = re.compile(
 )
 
 
+def _current_game_version_for_prompt() -> str:
+    """Best-effort read of the live WoW context, just to pick the right
+    search-source tier list below -- wrapped defensively since this runs at
+    system-prompt build time (session creation only, see build_system_prompt's
+    own docstring for why that matters), and "WoW Forever" was the only
+    flavor this app ever supported before v1.2.x, so it's the safe default
+    on any read failure or missing addon."""
+    try:
+        context_path = find_wow_context_file()
+        if not context_path:
+            return "WoW Forever"
+        return read_wow_context(context_path).get("gameVersion") or "WoW Forever"
+    except Exception:
+        return "WoW Forever"
+
+
 def build_system_prompt() -> str:
     """Static behavior/tone instructions. --append-system-prompt only actually
     takes effect on the turn that CREATES a session (--session-id) -- on every
@@ -375,39 +415,79 @@ def build_system_prompt() -> str:
     that can change turn-to-turn (the date, WoW context) must NOT live here or
     it'll freeze at whatever was true on message 1 for the rest of that
     session. Only put things here that are fine to fix for the session's
-    whole lifetime. See build_turn_context() for the per-turn stuff."""
+    whole lifetime. See build_turn_context() for the per-turn stuff.
+
+    The one exception is which flavor's search-source list to bake in below
+    -- read once here, at session-creation time, since there's no other
+    chance to pick it. If the player switches flavors mid-conversation
+    without clicking New, this goes stale for that session (same class of
+    limitation --append-system-prompt already has generally) -- the per-turn
+    context block still discloses the actual current flavor either way, so
+    answers stay grounded even if these particular source URLs don't."""
+    game_version = _current_game_version_for_prompt()
+    is_forever = game_version == "WoW Forever"
+
+    if is_forever:
+        tier1, tier2, tier3, tier4 = (
+            WOW_SOURCE_TIER_1_OFFICIAL_FOREVER, WOW_SOURCE_TIER_2_PRIMARY_FOREVER,
+            WOW_SOURCE_TIER_3_SECONDARY_FOREVER, WOW_SOURCE_TIER_4_BACKUP_FOREVER,
+        )
+        version_intro = (
+            "World of Warcraft: Forever, a brand-new Classic+ game in active "
+            "beta that postdates your training data -- search the web for "
+            "anything about it (patches, quests, zones, classes, professions) "
+            "rather than guessing."
+        )
+    else:
+        tier1, tier2, tier3, tier4 = (
+            WOW_SOURCE_TIER_1_OFFICIAL_GENERIC, WOW_SOURCE_TIER_2_PRIMARY_GENERIC,
+            WOW_SOURCE_TIER_3_SECONDARY_GENERIC, WOW_SOURCE_TIER_4_BACKUP_GENERIC,
+        )
+        version_intro = (
+            f"World of Warcraft ({game_version}). It's a live, regularly "
+            "patched game -- search the web for anything version/patch-"
+            "specific rather than relying on your training data, which may "
+            f"predate recent {game_version} content. When you search, "
+            f"include \"{game_version}\" in the query so results are for "
+            "the right version, not a different WoW flavor."
+        )
+
     return (
         "You are answering questions inside a small floating overlay box on top "
-        "of a video game (World of Warcraft: Forever). Keep answers short and "
+        f"of a video game ({version_intro}) Keep answers short and "
         "skimmable -- a few sentences or a short list -- unless explicitly asked "
-        "for more detail. WoW Forever is a brand-new Classic+ game in active "
-        "beta that postdates your training data -- search the web for anything "
-        "about it (patches, quests, zones, classes, professions) rather than "
-        "guessing. Never treat this as optional or skip straight to answering "
-        "from memory for anything version/patch/beta-specific -- jump straight "
-        "to a web search instead of asking clarifying questions first.\n\n"
+        "for more detail. Never treat searching as optional or skip straight to "
+        "answering from memory for anything version/patch-specific -- jump "
+        "straight to a web search instead of asking clarifying questions first.\n\n"
         "Search in this strict priority order, and don't silently skip a tier "
         "just because an earlier one turned up something vague -- keep going "
         "until you have a real answer or have genuinely exhausted all four:\n"
         "1. Official (authoritative for dates/pricing/patch notes): "
-        + ", ".join(WOW_SOURCE_TIER_1_OFFICIAL) + "\n"
+        + ", ".join(tier1) + "\n"
         "2. Primary reference (most comprehensive, actively updated -- "
-        "datamining, blue-post tracking): " + ", ".join(WOW_SOURCE_TIER_2_PRIMARY) + "\n"
+        "datamining, blue-post tracking): " + ", ".join(tier2) + "\n"
         "3. Strong secondary (credentialed authors, actively maintained): "
-        + ", ".join(WOW_SOURCE_TIER_3_SECONDARY) + "\n"
+        + ", ".join(tier3) + "\n"
         "4. Backup only, if 1-3 genuinely have nothing on the topic: "
-        + ", ".join(WOW_SOURCE_TIER_4_BACKUP) + " -- these are boosting-service "
+        + ", ".join(tier4) + " -- these are boosting-service "
         "content marketing, not dedicated reference sites. Treat them as a "
         "last resort, not a first stop, and weigh them accordingly.\n\n"
-        "If you've genuinely checked tiers 1-4 and still found nothing "
-        "Forever-specific on the topic, answer using how it worked in "
-        "vanilla/Classic WoW instead (Forever is Vanilla-based, so that's "
-        "usually a reasonable fallback) -- but say so explicitly and plainly, "
-        "e.g. \"couldn't confirm this for Forever specifically -- this is "
-        "based on how it worked in Classic, which may have changed.\" Never "
-        "present a Classic-knowledge guess as confirmed Forever fact, and "
-        "never quietly blend the two without flagging which is which.\n\n"
-        "Each message you receive is prefixed with "
+        + (
+            "If you've genuinely checked tiers 1-4 and still found nothing "
+            "Forever-specific on the topic, answer using how it worked in "
+            "vanilla/Classic WoW instead (Forever is Vanilla-based, so that's "
+            "usually a reasonable fallback) -- but say so explicitly and plainly, "
+            "e.g. \"couldn't confirm this for Forever specifically -- this is "
+            "based on how it worked in Classic, which may have changed.\" Never "
+            "present a Classic-knowledge guess as confirmed Forever fact, and "
+            "never quietly blend the two without flagging which is which.\n\n"
+            if is_forever else
+            "If you've genuinely checked tiers 1-4 and still found nothing "
+            f"specific to {game_version} on the topic, say so explicitly rather "
+            "than quietly answering from general WoW knowledge that might be "
+            "for the wrong version or patch.\n\n"
+        )
+        + "Each message you receive is prefixed with "
         "a fresh [context] block (today's date, and the player's live "
         "character/location/quest-log state when available) -- always trust "
         "that block over anything said earlier in the conversation, since it's "
@@ -616,11 +696,18 @@ def format_wow_context(data: dict) -> str:
     char = data.get("character", {})
     loc = data.get("location", {})
     quests = data.get("quests", [])
+    # Missing on a SavedVariables file written by an older addon version,
+    # before per-flavor support existed -- Forever was the only supported
+    # client back then, so that's a safe default rather than "unknown".
+    game_version = data.get("gameVersion") or "WoW Forever"
 
     lines = [
-        "[Live WoW Forever character context -- use this to figure out who/"
-        "where the player means (e.g. an NPC named in a quest objective) "
-        "before searching, rather than asking them to clarify]",
+        f"[Live WoW character context ({game_version}) -- use this to figure "
+        "out who/where the player means (e.g. an NPC named in a quest "
+        "objective) before searching, rather than asking them to clarify. "
+        "Quest content, itemization, and class mechanics differ between WoW "
+        "versions -- ground any specific advice in the version above, not "
+        "whichever one you might otherwise assume.]",
         f"Character: {char.get('name', '?')} -- Level {char.get('level', '?')} "
         f"{char.get('race', '')} {char.get('class', '')} "
         f"({char.get('faction', '')}), realm {char.get('realm', '')}",
@@ -652,8 +739,9 @@ def format_wow_context(data: dict) -> str:
     talents = data.get("talents")
     if talents:
         lines.append(
-            f"Talent points spent (best-effort -- WoW Forever's talent API "
-            f"isn't fully confirmed, treat as approximate): {talents}"
+            f"Talent points spent (best-effort, classic 3-tree talent API "
+            f"only -- treat as approximate, and absent entirely on versions "
+            f"with a different talent system): {talents}"
         )
 
     bags = data.get("bags")
@@ -1172,6 +1260,31 @@ class ClaudeOverlay:
 
     # ---------- settings dialog ----------
 
+    def _manage_wow_installs(self):
+        """Relaunches the setup tool in --manage mode (jumps straight to
+        the WoW-install checklist, skipping the already-satisfied
+        prerequisite/login pages) so a player who skipped a flavor at first
+        install, or picked up a new one since, can add it without a fresh
+        download."""
+        if not os.path.isfile(SETUP_EXE_PATH):
+            self._append_answer(
+                f"[Couldn't find the setup tool at {SETUP_EXE_PATH} -- try "
+                "reinstalling from the GitHub releases page.]",
+                tag="error",
+            )
+            return
+        try:
+            subprocess.Popen([SETUP_EXE_PATH, "--manage"])
+        except Exception as exc:
+            self._append_answer(f"[Couldn't launch the setup tool: {exc}]", tag="error")
+            return
+        if getattr(self, "_settings_win", None) is not None:
+            try:
+                self._settings_win.destroy()
+            except Exception:
+                pass
+            self._settings_win = None
+
     def _open_settings_dialog(self):
         if getattr(self, "_settings_win", None) is not None:
             # Clicking the gear again while it's already open closes it --
@@ -1307,6 +1420,23 @@ class ClaudeOverlay:
         tk.Label(
             content, text="e.g. ctrl+shift+space -- restart may be needed if it doesn't take effect live",
             bg=bg, fg="#6f6f78", font=("Segoe UI", 7), anchor="w", wraplength=300, justify="left",
+        ).pack(fill="x", pady=(2, 0))
+
+        tk.Label(
+            content, text="WoW installs", bg=bg, fg=fg,
+            font=("Segoe UI", 10, "bold"), anchor="w",
+        ).pack(fill="x", pady=(14, 4))
+        manage_wow_lbl = tk.Label(
+            content, text="Manage WoW installs...", bg=bg, fg=accent,
+            font=("Segoe UI", 9, "underline"), anchor="w", cursor="hand2",
+        )
+        manage_wow_lbl.pack(fill="x")
+        manage_wow_lbl.bind("<Button-1>", lambda e: self._manage_wow_installs())
+        tk.Label(
+            content, text="Add the addon to another WoW install (Retail, "
+            "Classic, etc.), or re-add it if you skipped one.",
+            bg=bg, fg="#6f6f78", font=("Segoe UI", 7), anchor="w",
+            wraplength=300, justify="left",
         ).pack(fill="x", pady=(2, 0))
 
         status_lbl = tk.Label(

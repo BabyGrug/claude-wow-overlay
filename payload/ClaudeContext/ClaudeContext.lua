@@ -93,6 +93,41 @@ end
 -- Data collection
 -- ============================================================================
 
+-- Which game version this client actually is -- matters a lot, since quest
+-- content, itemization and talents genuinely differ between them, and the
+-- overlay app picks up whichever flavor's SavedVariables file was written
+-- most recently (see overlay.py's find_wow_context_file()). Without this,
+-- Claude could confidently answer a Retail question off stale Classic data
+-- with no way to notice the mismatch.
+--
+-- WoW Forever's own interface/toc version (16000-19999) is checked FIRST and
+-- confirmed via the same heuristic installer.py already uses successfully
+-- to detect it (a distinct product, not just "some classic client"). The
+-- WOW_PROJECT_* constants below are Blizzard's own official values for
+-- telling retail/classic-era/etc. apart -- reliable for everything except
+-- Forever specifically, which may or may not share an ID with an existing
+-- tier (unconfirmed -- no live Retail/Classic client here to check against).
+local function GetGameFlavor()
+    local tocVersion = select(4, GetBuildInfo())
+    if tocVersion and tocVersion >= 16000 and tocVersion <= 19999 then
+        return "WoW Forever"
+    end
+    local id = WOW_PROJECT_ID
+    if id == WOW_PROJECT_MAINLINE then return "Retail"
+    elseif id == WOW_PROJECT_CLASSIC then return "Classic Era"
+    elseif WOW_PROJECT_BURNING_CRUSADE_CLASSIC and id == WOW_PROJECT_BURNING_CRUSADE_CLASSIC then
+        return "Burning Crusade Classic"
+    elseif WOW_PROJECT_WRATH_CLASSIC and id == WOW_PROJECT_WRATH_CLASSIC then
+        return "Wrath Classic"
+    elseif WOW_PROJECT_CATACLYSM_CLASSIC and id == WOW_PROJECT_CATACLYSM_CLASSIC then
+        return "Cataclysm Classic"
+    elseif WOW_PROJECT_MISTS_CLASSIC and id == WOW_PROJECT_MISTS_CLASSIC then
+        return "Mists of Pandaria Classic"
+    else
+        return "Unknown WoW version (internal ID " .. tostring(id) .. ")"
+    end
+end
+
 local function GetCoords()
     local mapId = C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player")
     if not mapId then return nil, nil, nil end
@@ -108,10 +143,44 @@ local function GetMapName(mapId)
     return info and info.name
 end
 
-local function CollectQuests()
+-- BEST-EFFORT fallback for clients without C_QuestLog at all. Unlike the
+-- C_QuestLog path below (verified via QuestMaster's Compat.lua on WoW
+-- Forever), this hasn't been checked against a live Classic Era client or a
+-- reference addon -- there's no such client installed here to test against.
+-- Uses the pre-Legion legacy quest-log API, which is what Classic Era
+-- addons historically needed. Needs real-world confirmation.
+local function CollectQuestsLegacy()
     local quests = {}
-    if not C_QuestLog then return quests end
+    if not GetNumQuestLogEntries or not GetQuestLogTitle then return quests end
+    local n = GetNumQuestLogEntries() or 0
+    for i = 1, n do
+        local title, level, _, isHeader, _, _, _, questID = GetQuestLogTitle(i)
+        if not isHeader and questID and questID ~= 0 then
+            local objectives = {}
+            local numObj = GetNumQuestLeaderBoards and GetNumQuestLeaderBoards(i) or 0
+            for j = 1, numObj do
+                local text = GetQuestLogLeaderBoard and GetQuestLogLeaderBoard(j, i)
+                if text and text ~= "" then
+                    table.insert(objectives, text)
+                end
+            end
+            table.insert(quests, {
+                title = title or "",
+                level = level or 0,
+                questID = questID,
+                objectives = objectives,
+            })
+        end
+    end
+    return quests
+end
 
+local function CollectQuests()
+    if not (C_QuestLog and C_QuestLog.GetInfo) then
+        return CollectQuestsLegacy()
+    end
+
+    local quests = {}
     -- Quests under a collapsed header are invisible to the scan -- expand
     -- everything first. Safe to call on non-headers too.
     local n = C_QuestLog.GetNumQuestLogEntries() or 0
@@ -278,6 +347,7 @@ local function BuildContext()
 
     local context = {
         savedAt = date("%Y-%m-%d %H:%M:%S"),
+        gameVersion = GetGameFlavor(),
         character = {
             name = UnitName("player") or "",
             realm = GetRealmName() or "",

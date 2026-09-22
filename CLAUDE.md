@@ -18,19 +18,49 @@ appears anywhere -- see **Privacy** below).
 - `installer.py` -- a Tkinter setup wizard that bundles the compiled
   overlay exe + WoW addon files as payload, walks a non-technical user
   through prerequisites, login, and installation. Also compiled standalone.
-  Same exe, three modes selected by argv: no flag -> the full wizard
-  (first install); `--uninstall` -> `UninstallApp` (this is what the
-  registry's "Apps & Features" entry points at); `--update` ->
-  `run_quiet_update()`, used by the overlay's own in-app updater for a
-  routine version bump -- re-checks prerequisites and re-copies files
-  silently with no UI, only falling back to the full wizard if a check
-  actually fails.
+  Same exe, four modes selected by argv: no flag -> the full wizard (first
+  install); `--uninstall` -> `UninstallApp` (this is what the registry's
+  "Apps & Features" entry points at); `--update` -> `run_quiet_update()`,
+  used by the overlay's own in-app updater for a routine version bump --
+  re-checks prerequisites and re-copies files silently with no UI, only
+  falling back to the full wizard if a check actually fails; `--manage` ->
+  `InstallerApp(skip_welcome=True)`, launched from the overlay's own
+  Settings ("Manage WoW installs...") -- skips straight to the same
+  prerequisite-check page the normal flow uses (Claude's obviously already
+  installed/logged in at that point) so a player can add a WoW flavor they
+  skipped the first time without a fresh download.
 - `payload/` -- what `installer.py` bundles: the compiled
   `ClaudeWowOverlay.exe` (gitignored, rebuilt every release), `icon.ico`,
   and `ClaudeContext/` (the WoW addon source, tracked in git).
 - The live WoW addon (`Interface/AddOns/ClaudeContext/` inside the actual
   WoW install) is a **copy** of `payload/ClaudeContext/`. Edit one, copy the
-  change to the other -- they're not symlinked.
+  change to the other -- they're not symlinked. As of v1.2.x this may be
+  copied into *multiple* WoW flavor installs on the same machine (Forever,
+  Retail, Classic, Classic Era) -- see multi-flavor support below.
+
+### Multi-flavor WoW support (v1.2.x+)
+
+One addon file works across every WoW flavor -- `find_wow_installs()`
+(`installer.py`) detects every `_*_` build folder under both Program Files
+roots and labels each (Retail/Classic/Classic Era/WoW Forever), letting the
+setup wizard's checklist page install into any/all of them at once.
+`install_info.json` stores the chosen list (`addons_paths`, plural -- an
+older singular `addons_path` from pre-1.2.1 installs is read transparently
+for backward compat) so the uninstaller and the quiet updater both know
+which install(s) to refresh without re-asking.
+
+The addon itself detects which flavor it's running on via `GetGameFlavor()`
+in `ClaudeContext.lua`: WoW Forever's interface/toc version (16000-19999,
+checked via `select(4, GetBuildInfo())`) is checked *first*, since Forever
+can share a folder name (`_classic_beta_`) with an unrelated beta and its
+own `WOW_PROJECT_ID` is indistinguishable from Retail's (confirmed directly:
+both report `1`) -- falling through to `WOW_PROJECT_ID`/the official
+`WOW_PROJECT_*` constants only for everything else. This `gameVersion` field
+is surfaced to Claude in both the per-turn context (`format_wow_context`)
+and, read once at session-creation time, the system prompt's search-source
+tier list (`build_system_prompt` picks Forever's hand-researched tier list
+vs. a generic one) -- without it, Claude could confidently answer a Retail
+question off stale Classic data with no way to notice the mismatch.
 
 ## The core loop
 
@@ -296,8 +326,18 @@ notes, code comments, etc.
   has. Not built. If asked again: either confirm a genuine xAI CLI+OAuth
   equivalent exists, or it's a bigger fork into API-key-based auth (a real,
   different design decision, not a small addition).
-- Only WoW Forever is supported by the addon (hardcoded to `C_QuestLog`/
-  `C_Map`, TOC pinned to interface 16000-19999) -- not retail, not other
-  Classic versions.
+- **Multi-flavor support (Retail/Classic/Classic Era) shipped in v1.2.x
+  but is unverified beyond WoW Forever** -- there's no Retail or Classic
+  client on this machine to test against, unlike Forever which has been
+  verified repeatedly against a live client and QuestMaster's source. The
+  legacy quest-log fallback (`CollectQuestsLegacy`), the `GetGameFlavor()`
+  detection, and the TOC's non-Forever interface numbers are all built from
+  general WoW API knowledge and defensive coding (try modern API, fall back
+  to legacy, degrade to empty/nil rather than crash) but genuinely need the
+  user's own real-world testing to confirm, the same way Forever's bugs
+  (`GetItemInfo` nil, the login-sync timing race) only ever got found and
+  fixed through live testing, not guessing. If the user reports Retail/
+  Classic-specific issues, don't assume the API guess was right -- ask for
+  a `/run` diagnostic the way gotcha #17/#18 did, don't just guess again.
 - Versioning is semantic (vMAJOR.MINOR.PATCH) by default; revisit if the
   user asks for something simpler.
