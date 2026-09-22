@@ -48,6 +48,7 @@ import threading
 import time
 import tkinter as tk
 import traceback
+import urllib.error
 import urllib.request
 import uuid
 from tkinter import font as tkfont
@@ -145,7 +146,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 
 def _icon_path():
@@ -240,6 +241,14 @@ def format_hotkey_display(hotkey: str) -> str:
 UPDATE_REPO = "BabyGrug/claude-wow-overlay"
 UPDATE_CHECK_URL = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
 UPDATE_ASSET_NAME = "ClaudeWowOverlaySetup.exe"
+# This app is meant to run continuously through a whole WoW session (and
+# now, with v1.2.0's conversation persistence, there's even less reason to
+# ever restart it) -- a check only at startup means anyone who leaves it
+# running never finds out a new release exists at all, no matter how long
+# it's been out. Re-checking periodically fixes that; 2 hours is frequent
+# enough to matter without hammering GitHub's API for what's a cosmetic,
+# non-critical feature.
+UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000
 
 
 def _version_tuple(v: str):
@@ -253,10 +262,22 @@ def _version_tuple(v: str):
 
 
 def check_for_update():
-    """(latest_version, download_url) if a newer release exists, else
-    (None, None). A plain anonymous metadata request -- no user data sent,
-    nothing installed automatically. Silent on any failure (offline, GitHub
-    down, rate-limited) since this is a nice-to-have, not core functionality."""
+    """(latest_version, download_url, error). error is None whenever the
+    check itself actually completed -- whether or not a newer version
+    turned up -- and a short string when it didn't (network, GitHub down,
+    rate-limited, etc.), so a manual on-demand check can tell "genuinely up
+    to date" apart from "couldn't tell" instead of treating every failure
+    as silently the same as nothing new. The background/startup check
+    still ignores this and stays quiet on failure either way -- it's a
+    nice-to-have the user never explicitly asked for, unlike a manual
+    click. A plain anonymous metadata request -- no user data sent, nothing
+    installed automatically.
+
+    Confirmed directly (curl against this exact endpoint): unauthenticated
+    GitHub API calls share a 60/hour-per-IP limit, and enough testing
+    (repeated app relaunches each checking, plus direct curl/gh calls) can
+    burn through that during a single active dev/test session -- exactly
+    what silently broke this once already."""
     try:
         req = urllib.request.Request(
             UPDATE_CHECK_URL,
@@ -264,23 +285,28 @@ def check_for_update():
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
-        # GitHub tag names are "vX.Y.Z" -- strip the "v" here so every
-        # downstream consumer (the "Update to vX" button text, etc.) gets a
-        # bare version number and adds its own single "v" prefix, rather than
-        # each caller having to remember whether this string already has one.
-        latest = (data.get("tag_name") or "").strip().lstrip("vV")
-        if not latest or _version_tuple(latest) <= _version_tuple(APP_VERSION):
-            return None, None
-        download_url = None
-        for asset in data.get("assets", []):
-            if asset.get("name") == UPDATE_ASSET_NAME:
-                download_url = asset.get("browser_download_url")
-                break
-        if not download_url:
-            return None, None
-        return latest, download_url
-    except Exception:
-        return None, None
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            return None, None, "rate-limited -- try again in a bit"
+        return None, None, f"HTTP {exc.code}"
+    except Exception as exc:
+        return None, None, str(exc)
+
+    # GitHub tag names are "vX.Y.Z" -- strip the "v" here so every
+    # downstream consumer (the "Update to vX" button text, etc.) gets a
+    # bare version number and adds its own single "v" prefix, rather than
+    # each caller having to remember whether this string already has one.
+    latest = (data.get("tag_name") or "").strip().lstrip("vV")
+    if not latest or _version_tuple(latest) <= _version_tuple(APP_VERSION):
+        return None, None, None
+    download_url = None
+    for asset in data.get("assets", []):
+        if asset.get("name") == UPDATE_ASSET_NAME:
+            download_url = asset.get("browser_download_url")
+            break
+    if not download_url:
+        return None, None, "release asset not found"
+    return latest, download_url, None
 
 # Ranked, not a flat list -- researched 2026-09-20, specifically for WoW
 # Forever. Official > Wowhead > Icy Veins > everything else. The tier-4
@@ -978,7 +1004,7 @@ class ClaudeOverlay:
         if not self.settings.get("seen_first_run_tips"):
             self.root.after(300, self._show_first_run_tips)
 
-        threading.Thread(target=self._check_for_update_bg, daemon=True).start()
+        self._schedule_periodic_update_check()
 
         # Set by installer.py's quiet --update path right before relaunching
         # this exe, once it's silently re-verified everything and refreshed
@@ -1439,6 +1465,19 @@ class ClaudeOverlay:
             wraplength=300, justify="left",
         ).pack(fill="x", pady=(2, 0))
 
+        check_update_lbl = tk.Label(
+            content, text="Check for updates now", bg=bg, fg=accent,
+            font=("Segoe UI", 9, "underline"), anchor="w", cursor="hand2",
+        )
+        check_update_lbl.pack(fill="x", pady=(10, 0))
+        check_update_lbl.bind("<Button-1>", lambda e: self._check_for_update_now())
+        tk.Label(
+            content, text="Also checked automatically every couple hours "
+            "while the app is running.",
+            bg=bg, fg="#6f6f78", font=("Segoe UI", 7), anchor="w",
+            wraplength=300, justify="left",
+        ).pack(fill="x", pady=(2, 0))
+
         status_lbl = tk.Label(
             content, text="", bg=bg, fg="#ff6b6b", font=("Segoe UI", 8),
             anchor="w", wraplength=300, justify="left",
@@ -1612,9 +1651,39 @@ class ClaudeOverlay:
     # ---------- updates ----------
 
     def _check_for_update_bg(self):
-        latest, download_url = check_for_update()
+        latest, download_url, _error = check_for_update()
         if latest:
             self.ui_queue.put(("update_available", (latest, download_url)))
+
+    def _schedule_periodic_update_check(self):
+        threading.Thread(target=self._check_for_update_bg, daemon=True).start()
+        self.root.after(UPDATE_CHECK_INTERVAL_MS, self._schedule_periodic_update_check)
+
+    def _check_for_update_now(self):
+        """Manual on-demand check, from Settings -- doesn't wait for the
+        periodic timer. Shows a quick status in the version slot either way
+        so clicking it isn't a silent no-op when there's nothing new, and
+        (unlike the quiet background check) surfaces WHY if the check
+        itself failed rather than just looking like "nothing new"."""
+        if self.busy or self._update_available:
+            return
+        self.update_btn.config(text="Checking for updates...")
+
+        def worker():
+            latest, download_url, error = check_for_update()
+            if latest:
+                self.ui_queue.put(("update_available", (latest, download_url)))
+            else:
+                self.ui_queue.put(("no_update_found", error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_no_update_found(self, error=None):
+        if error:
+            self.update_btn.config(text=f"Couldn't check: {error}", fg="#ff6b6b")
+        else:
+            self.update_btn.config(text="You're up to date", fg="#6f6f78")
+        self.root.after(4000, self._clear_just_updated)
 
     def _show_update_button(self, payload):
         latest, download_url = payload
@@ -1770,6 +1839,8 @@ class ClaudeOverlay:
                     self.ask_about_screen()
                 elif action == "update_available":
                     self._show_update_button(payload)
+                elif action == "no_update_found":
+                    self._show_no_update_found(payload)
                 elif action == "update_progress":
                     self._show_update_progress(payload)
                 elif action == "quit":

@@ -267,6 +267,26 @@ the visible text and turned into UI:
     addon's own event-triggered path, suspect timing before suspecting the
     API.
 
+19. **`check_for_update()` used to be completely silent on failure**, which
+    meant a genuine check failure (offline, GitHub down, rate-limited) was
+    indistinguishable from "you're already up to date" -- confirmed directly
+    that this is exactly what broke real update detection once: GitHub's
+    public API is a shared 60-requests/hour-per-IP limit, and this project's
+    own testing pattern (frequent app relaunches, each checking, plus direct
+    `curl`/`gh` calls from the same machine) burned through it during a
+    single active session (`curl -i https://api.github.com/repos/.../releases/latest`
+    returned a plain `403 rate limit exceeded` with `X-RateLimit-Remaining: 0`
+    -- not a guess, checked directly). Fixed: `check_for_update()` now
+    returns `(latest, download_url, error)`, with `error` naming what went
+    wrong. The quiet background/periodic check still ignores it on purpose
+    (the user never asked for that one), but the manual "Check for updates
+    now" (Settings) surfaces it. Also added periodic re-checking
+    (`UPDATE_CHECK_INTERVAL_MS`, every 2h) -- before this, a check only ever
+    ran once at startup, so an app left running for a while (which is the
+    *normal* way to use it, especially with v1.2.0's conversation
+    persistence removing the old reason to restart) would never learn a new
+    version existed no matter how long it had been out.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)

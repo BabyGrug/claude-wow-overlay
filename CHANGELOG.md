@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.3
+- Fixed updates silently never appearing. Two separate problems, both real:
+  the app only ever checked for updates once at startup, so anyone who left
+  it running for a while would never find out a new version existed no
+  matter how long it had been out -- now it also re-checks automatically
+  every couple hours. And the check silently treated a genuine failure
+  (offline, GitHub down, rate-limited) exactly the same as "you're up to
+  date," with zero way to tell the difference -- confirmed directly that
+  this is exactly what happened (GitHub's public API is rate-limited to
+  60 requests/hour per IP, and enough app relaunches during testing burned
+  through it). A failed check now says so.
+- Added "Check for updates now" to Settings for an on-demand check instead
+  of waiting for the automatic one.
+
 ## v1.2.2
 - Fixed the box seemingly vanishing after installing an update. It was
   still running the whole time, just relaunching hidden like any other
