@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.2
+- Fixed the box seemingly vanishing after installing an update. It was
+  still running the whole time, just relaunching hidden like any other
+  normal startup instead of showing itself -- the hotkey brought it back,
+  but nothing told you that. It now shows itself automatically the moment
+  the update finishes.
+
 ## v1.2.1
 - The setup wizard now finds *every* WoW install on your machine (WoW
   Forever, Retail, Classic, Classic Era) and lets you check off which ones

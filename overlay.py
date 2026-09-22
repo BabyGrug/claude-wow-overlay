@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 
 def _icon_path():
@@ -1633,6 +1633,11 @@ class ClaudeOverlay:
         ).start()
 
     def _show_just_updated(self):
+        # Without this the update just silently vanishes from the player's
+        # perspective -- the old process quit to hand off to the installer,
+        # the new one launches same as any other startup (hidden until the
+        # hotkey), so there's no visible sign it ever came back at all.
+        self.show()
         self.update_btn.config(text=f"✓ Updated to v{APP_VERSION}", fg="#4caf50", cursor="")
         self.root.after(10000, self._clear_just_updated)
 
