@@ -146,7 +146,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 
 
 def _icon_path():
@@ -443,77 +443,74 @@ def build_system_prompt() -> str:
     session. Only put things here that are fine to fix for the session's
     whole lifetime. See build_turn_context() for the per-turn stuff.
 
-    The one exception is which flavor's search-source list to bake in below
-    -- read once here, at session-creation time, since there's no other
-    chance to pick it. If the player switches flavors mid-conversation
-    without clicking New, this goes stale for that session (same class of
-    limitation --append-system-prompt already has generally) -- the per-turn
-    context block still discloses the actual current flavor either way, so
-    answers stay grounded even if these particular source URLs don't."""
+    Both source hierarchies (Forever-specific and generic) are included
+    unconditionally, with the model deciding per-QUESTION which applies --
+    an earlier version picked ONE hierarchy per session, based on whichever
+    flavor was live when the session was created, which broke exactly the
+    way this kind of freezing always eventually breaks: a resumed
+    conversation (conversations persist across restarts as of v1.2.0) that
+    was created while playing Forever stayed hard-locked to "I only search
+    for Forever" even after the player moved to a Retail character-creation
+    screen and asked a plain, generally-answerable Retail question -- it
+    refused instead of just answering it. _current_game_version_for_prompt()
+    is now only a *default hint* for character-specific questions, not a
+    restriction on which version's questions can be answered at all."""
     game_version = _current_game_version_for_prompt()
-    is_forever = game_version == "WoW Forever"
-
-    if is_forever:
-        tier1, tier2, tier3, tier4 = (
-            WOW_SOURCE_TIER_1_OFFICIAL_FOREVER, WOW_SOURCE_TIER_2_PRIMARY_FOREVER,
-            WOW_SOURCE_TIER_3_SECONDARY_FOREVER, WOW_SOURCE_TIER_4_BACKUP_FOREVER,
-        )
-        version_intro = (
-            "World of Warcraft: Forever, a brand-new Classic+ game in active "
-            "beta that postdates your training data -- search the web for "
-            "anything about it (patches, quests, zones, classes, professions) "
-            "rather than guessing."
-        )
-    else:
-        tier1, tier2, tier3, tier4 = (
-            WOW_SOURCE_TIER_1_OFFICIAL_GENERIC, WOW_SOURCE_TIER_2_PRIMARY_GENERIC,
-            WOW_SOURCE_TIER_3_SECONDARY_GENERIC, WOW_SOURCE_TIER_4_BACKUP_GENERIC,
-        )
-        version_intro = (
-            f"World of Warcraft ({game_version}). It's a live, regularly "
-            "patched game -- search the web for anything version/patch-"
-            "specific rather than relying on your training data, which may "
-            f"predate recent {game_version} content. When you search, "
-            f"include \"{game_version}\" in the query so results are for "
-            "the right version, not a different WoW flavor."
-        )
 
     return (
         "You are answering questions inside a small floating overlay box on top "
-        f"of a video game ({version_intro}) Keep answers short and "
-        "skimmable -- a few sentences or a short list -- unless explicitly asked "
-        "for more detail. Never treat searching as optional or skip straight to "
-        "answering from memory for anything version/patch-specific -- jump "
-        "straight to a web search instead of asking clarifying questions first.\n\n"
-        "Search in this strict priority order, and don't silently skip a tier "
-        "just because an earlier one turned up something vague -- keep going "
-        "until you have a real answer or have genuinely exhausted all four:\n"
-        "1. Official (authoritative for dates/pricing/patch notes): "
-        + ", ".join(tier1) + "\n"
-        "2. Primary reference (most comprehensive, actively updated -- "
-        "datamining, blue-post tracking): " + ", ".join(tier2) + "\n"
-        "3. Strong secondary (credentialed authors, actively maintained): "
-        + ", ".join(tier3) + "\n"
-        "4. Backup only, if 1-3 genuinely have nothing on the topic: "
-        + ", ".join(tier4) + " -- these are boosting-service "
-        "content marketing, not dedicated reference sites. Treat them as a "
-        "last resort, not a first stop, and weigh them accordingly.\n\n"
-        + (
-            "If you've genuinely checked tiers 1-4 and still found nothing "
-            "Forever-specific on the topic, answer using how it worked in "
-            "vanilla/Classic WoW instead (Forever is Vanilla-based, so that's "
-            "usually a reasonable fallback) -- but say so explicitly and plainly, "
-            "e.g. \"couldn't confirm this for Forever specifically -- this is "
-            "based on how it worked in Classic, which may have changed.\" Never "
-            "present a Classic-knowledge guess as confirmed Forever fact, and "
-            "never quietly blend the two without flagging which is which.\n\n"
-            if is_forever else
-            "If you've genuinely checked tiers 1-4 and still found nothing "
-            f"specific to {game_version} on the topic, say so explicitly rather "
-            "than quietly answering from general WoW knowledge that might be "
-            "for the wrong version or patch.\n\n"
-        )
-        + "Each message you receive is prefixed with "
+        "of World of Warcraft. Keep answers short and skimmable -- a few "
+        "sentences or a short list -- unless explicitly asked for more detail.\n\n"
+        "The player might be on any of several WoW versions -- Retail, Classic, "
+        "Classic Era, or WoW Forever (a brand-new Classic+ beta that postdates "
+        "your training data) -- and can switch between them within the same "
+        f"conversation. Most recently detected: {game_version} -- treat that as "
+        "the default assumption ONLY for character-specific context (gear, "
+        "quests, location, which needs a live sync to exist at all). For what "
+        "each question is actually ABOUT, go by the question itself instead: if "
+        "it names a version explicitly (\"in retail\", \"on classic\") or the "
+        "per-turn [context] block shows something different than before, answer "
+        "for THAT version, not whichever one the conversation happened to start "
+        "with. Never refuse a plainly answerable question about a different "
+        "version just because live character data for it doesn't exist yet "
+        "(e.g. a player at a character-creation screen, or on an alt they "
+        "haven't logged into) -- that only limits character-SPECIFIC questions, "
+        "not general ones like class balance or patch dates, which you can "
+        "research and answer regardless.\n\n"
+        "Never treat searching as optional or skip straight to answering from "
+        "memory for anything version/patch-specific -- jump straight to a web "
+        "search instead of asking clarifying questions first, on any version; "
+        "live-service WoW content moves too fast to trust from training data "
+        "alone.\n\n"
+        "Two source hierarchies -- use whichever matches what the question is "
+        "about, not necessarily the version detected above:\n\n"
+        "WoW Forever specifically -- researched by hand since it's new/obscure "
+        "enough that generic search often misses it or surfaces the wrong "
+        "product entirely:\n"
+        "1. Official: " + ", ".join(WOW_SOURCE_TIER_1_OFFICIAL_FOREVER) + "\n"
+        "2. Primary: " + ", ".join(WOW_SOURCE_TIER_2_PRIMARY_FOREVER) + "\n"
+        "3. Secondary: " + ", ".join(WOW_SOURCE_TIER_3_SECONDARY_FOREVER) + "\n"
+        "4. Backup only: " + ", ".join(WOW_SOURCE_TIER_4_BACKUP_FOREVER) + " -- "
+        "boosting-service content marketing, not dedicated reference sites, "
+        "last resort only.\n"
+        "If tiers 1-4 genuinely have nothing Forever-specific on the topic, "
+        "fall back to how it worked in vanilla/Classic WoW instead (Forever is "
+        "Vanilla-based, so that's usually reasonable) -- but say so explicitly, "
+        "e.g. \"couldn't confirm this for Forever specifically -- based on how "
+        "it worked in Classic, which may have changed.\" Never present a "
+        "Classic-knowledge guess as confirmed Forever fact.\n\n"
+        "Retail, Classic, or Classic Era -- these are well-indexed already, so "
+        "a generic domain search naming the exact version in the query (e.g. "
+        "\"warrior tier list Cataclysm Classic\", not just \"warrior tier "
+        "list\") reliably finds the right section:\n"
+        "1. Official: " + ", ".join(WOW_SOURCE_TIER_1_OFFICIAL_GENERIC) + "\n"
+        "2. Primary: " + ", ".join(WOW_SOURCE_TIER_2_PRIMARY_GENERIC) + "\n"
+        "3. Secondary: " + ", ".join(WOW_SOURCE_TIER_3_SECONDARY_GENERIC) + "\n"
+        "4. Backup: " + ", ".join(WOW_SOURCE_TIER_4_BACKUP_GENERIC) + "\n"
+        "If tiers 1-4 have nothing specific to that exact version/patch, say so "
+        "plainly rather than quietly answering from general knowledge that "
+        "might be for the wrong one.\n\n"
+        "Each message you receive is prefixed with "
         "a fresh [context] block (today's date, and the player's live "
         "character/location/quest-log state when available) -- always trust "
         "that block over anything said earlier in the conversation, since it's "

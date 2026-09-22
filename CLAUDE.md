@@ -287,6 +287,29 @@ the visible text and turned into UI:
     persistence removing the old reason to restart) would never learn a new
     version existed no matter how long it had been out.
 
+20. **Conversation persistence (v1.2.0) exposed a real edge in the
+    `--append-system-prompt`-freezes-per-session gotcha (#2) that didn't
+    matter before**: `build_system_prompt()` used to pick ONE search-source
+    hierarchy (Forever-specific vs. generic) based on whichever WoW flavor
+    was live *when the session was first created*, and baked in language
+    flatly framing the whole conversation as scoped to that one version.
+    Before conversations persisted, a session's lifetime was short enough
+    this rarely mattered; once they survive app restarts indefinitely, a
+    conversation created while playing Forever stayed hard-locked to "I only
+    search for Forever" even after the player moved to Retail and asked a
+    plain, generally-answerable Retail question -- confirmed directly via a
+    real screenshot, not a guess. Fixed by never locking the choice at all:
+    both hierarchies are always present, with the model told to decide
+    per-question (does the question name a version? does the current
+    per-turn context disagree with the session's original default?) rather
+    than the session baking in one exclusively.
+    `_current_game_version_for_prompt()`'s result is now only a *default
+    hint* for character-specific questions, same idea as gotcha #2's general
+    lesson: don't let the frozen-at-creation system prompt be the only
+    source of truth for anything that can legitimately change mid-session --
+    give the model the per-turn context to fall back on, or in this case,
+    just don't force a single choice into the frozen part at all.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)

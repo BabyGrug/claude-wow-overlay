@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.4
+- Fixed Claude flatly refusing questions about a different WoW version than
+  whichever one your conversation happened to start on -- e.g. asking about
+  Retail class balance while the conversation was originally created while
+  playing WoW Forever got a hard "that's outside what I search for Forever"
+  refusal, even though it was a plain, generally-answerable question. New
+  conversations now always have both the Forever-specific and generic
+  search-source lists available, and decide which applies per-question
+  instead of locking the whole conversation to one version. **Only affects
+  conversations created from now on** -- an existing/resumed conversation
+  keeps whatever got baked in when it was first created (a real limitation
+  of how session prompts work, not something fixable after the fact); click
+  "New" to pick up the fix in an old conversation.
+
 ## v1.2.3
 - Fixed updates silently never appearing. Two separate problems, both real:
   the app only ever checked for updates once at startup, so anyone who left
