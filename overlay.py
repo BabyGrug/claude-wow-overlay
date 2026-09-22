@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 
 
 def _icon_path():

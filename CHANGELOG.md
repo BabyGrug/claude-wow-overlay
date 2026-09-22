@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.7
+- Fixed equipped gear and bag items showing as empty even when clearly
+  equipped/carried. The very first sync right after login/reload was
+  running before WoW's own inventory cache had finished populating --
+  confirmed directly in-game (a manual `/claudesync` later in the same
+  session found the same gear just fine). The first post-login/reload sync
+  now waits 2 seconds before collecting data; other refresh triggers
+  (quest/zone changes, well into an already-loaded session) are unaffected.
+
 ## v1.1.6
 - Fixed a real in-game Lua error introduced in v1.1.0 ("Claude Context sync
   failed: ...ClaudeContext.lua:175: attempt to call a nil value") that hit

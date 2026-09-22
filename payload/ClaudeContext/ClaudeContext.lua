@@ -319,6 +319,20 @@ end
 -- Triggers
 -- ============================================================================
 
+-- Confirmed directly, in-game: the very first sync right after login/reload
+-- can report equipped gear (and presumably bag contents) as completely
+-- empty even though the player clearly has items equipped -- WoW's
+-- inventory/equipment cache isn't always populated the instant
+-- PLAYER_LOGIN/PLAYER_ENTERING_WORLD fires. A /claudesync run later in the
+-- same session (well after everything's settled) found the same gear just
+-- fine, which pins this down as a startup race, not a wrong API. A couple
+-- seconds' delay before the FIRST post-load sync avoids it; QUEST_LOG_UPDATE
+-- and ZONE_CHANGED_NEW_AREA fire well into an already-loaded session so they
+-- don't need it.
+local function DelayedSync()
+    C_Timer.After(2, Sync)
+end
+
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
 -- PLAYER_LOGIN only fires on a genuine fresh login, not on /reload -- without
@@ -328,7 +342,13 @@ f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("PLAYER_LOGOUT")
 f:RegisterEvent("QUEST_LOG_UPDATE")
 f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-f:SetScript("OnEvent", Sync)
+f:SetScript("OnEvent", function(self, event, ...)
+    if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
+        DelayedSync()
+    else
+        Sync()
+    end
+end)
 
 SLASH_CLAUDECONTEXT1 = "/claudesync"
 SlashCmdList["CLAUDECONTEXT"] = function()

@@ -213,6 +213,22 @@ the visible text and turned into UI:
     reference addon before shipping, no matter how safe it seems, the same
     way `C_QuestLog`/`C_Container`/waypoints already were.
 
+18. **The very first sync right after `PLAYER_LOGIN`/`PLAYER_ENTERING_WORLD`
+    can see an empty inventory/equipment cache**, even though the exact same
+    `GetInventorySlotInfo`/`GetInventoryItemLink`/`C_Container` calls work
+    correctly moments later. Confirmed directly (not guessed): a `/run` of
+    the raw API showed real equipped items, and a manual `/claudesync` later
+    in the same session captured them fine -- only the automatic sync
+    immediately on login/reload came back empty for `equipped`/`bags.items`
+    (gold and quest data were unaffected, so this is specifically an
+    inventory-cache race, not a broken sync in general). Fixed by wrapping
+    the `PLAYER_LOGIN`/`PLAYER_ENTERING_WORLD` sync in `C_Timer.After(2,
+    Sync)`; `QUEST_LOG_UPDATE`/`ZONE_CHANGED_NEW_AREA`/`PLAYER_LOGOUT` fire
+    well into an already-loaded session so they stay immediate. General
+    lesson: when something empirically works via `/run` but not through the
+    addon's own event-triggered path, suspect timing before suspecting the
+    API.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)
