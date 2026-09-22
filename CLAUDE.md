@@ -44,6 +44,14 @@ gear icon. `--restricted --allowedTools WebSearch,Read` (Read only added
 when a screenshot's involved, plus `--add-dir` to the screenshots folder),
 streamed via `--output-format stream-json --include-partial-messages`.
 
+The conversation (`session_id`, passed as `--session-id`/`--resume`) and the
+visible transcript persist across app restarts as of v1.2.0 -- `session_id`
+lives in `settings.json`, the rendered text in
+`%LOCALAPPDATA%\ClaudeWowOverlay\last_conversation.txt`, both cleared
+together by "New". Before v1.2.0 every restart silently started a fresh
+claude.exe session with no memory of anything asked before -- never a
+deliberate choice, just something nobody had persisted.
+
 Two hidden tags the model can emit at the end of an answer, stripped from
 the visible text and turned into UI:
 - `[MAPLOC zone="..." x=.. y=..]` -> a "Copy location" button

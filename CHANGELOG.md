@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.2.0
+- Conversations now persist across closing and reopening the app (including
+  an update's own relaunch) -- previously every restart silently started a
+  brand new conversation with no memory of anything asked before, which was
+  never a deliberate choice, just something nobody had wired up yet. The
+  visible history is restored too, with a marker showing where it picked
+  back up. "⟲ New" still starts a genuinely fresh conversation and clears
+  the saved history.
+
 ## v1.1.7
 - Fixed equipped gear and bag items showing as empty even when clearly
   equipped/carried. The very first sync right after login/reload was

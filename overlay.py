@@ -145,7 +145,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.2.0"
 
 
 def _icon_path():
@@ -178,7 +178,17 @@ DEFAULT_SETTINGS = {
     "window_w": WINDOW_W,
     "window_h": WINDOW_H,
     "seen_first_run_tips": False,
+    # Persisted so closing/reopening the app (including an update's own
+    # relaunch) resumes the same claude.exe conversation instead of quietly
+    # starting a new one every time -- that was never a deliberate choice,
+    # just something nobody had persisted yet. "New" is still the explicit
+    # way to reset both this and the visible transcript below.
+    "session_id": None,
 }
+
+TRANSCRIPT_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "last_conversation.txt"
+)
 
 # Model is fixed to Sonnet -- not user-selectable. (value, label) -- label is
 # what the Settings dialog shows; value is what gets passed to claude.exe's
@@ -827,7 +837,7 @@ class ClaudeOverlay:
         except FileNotFoundError as exc:
             self.claude_exe_error = str(exc)
 
-        self.session_id = None
+        self.session_id = self.settings.get("session_id")
         self.busy = False
         self._streaming = False
         self._current_proc = None
@@ -866,6 +876,7 @@ class ClaudeOverlay:
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
         self._build_ui()
+        self._restore_transcript()
         self.root.withdraw()  # start hidden; hotkey brings it up
 
         self.root.after(100, self._drain_ui_queue)
@@ -1409,7 +1420,9 @@ class ClaudeOverlay:
              "hotkey, next to \"Claude\" in the title bar. Click it again "
              "to close Settings, same as its X."),
             ("⟲ New", "Starts a fresh conversation -- Claude forgets "
-             "everything asked so far in this session."),
+             "everything asked so far. Otherwise your conversation is "
+             "remembered even after closing the app, so you don't need "
+             "this just to relaunch."),
             ("Tray icon", "Claude keeps running in the system tray when "
              "hidden -- right-click it for Show/Hide, New, Settings, or Quit."),
             ("✕ vs Quit", "✕ just hides the box (same as the hotkey). "
@@ -1642,6 +1655,7 @@ class ClaudeOverlay:
                     self._end_streaming_answer()
                     self._set_busy(False)
                     self._notify_if_hidden()
+                    self._save_transcript()
                 elif action == "tray_toggle":
                     self.toggle()
                 elif action == "tray_new":
@@ -1774,6 +1788,13 @@ class ClaudeOverlay:
 
     def new_conversation(self):
         self.session_id = None
+        self.settings["session_id"] = None
+        save_settings(self.settings)
+        try:
+            if os.path.isfile(TRANSCRIPT_PATH):
+                os.remove(TRANSCRIPT_PATH)
+        except OSError:
+            pass
         self.answer_box.config(state="normal")
         self.answer_box.delete("1.0", "end")
         self.answer_box.config(state="disabled")
@@ -1809,6 +1830,34 @@ class ClaudeOverlay:
         if self._streaming:
             self.answer_box.config(state="disabled")
             self._streaming = False
+
+    def _save_transcript(self):
+        """Best-effort -- losing the visible history is a minor annoyance,
+        never worth crashing over. Paired with session_id persistence so a
+        resumed claude.exe conversation isn't shown against a blank box."""
+        try:
+            text = self.answer_box.get("1.0", "end")
+            os.makedirs(os.path.dirname(TRANSCRIPT_PATH), exist_ok=True)
+            with open(TRANSCRIPT_PATH, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception:
+            pass
+
+    def _restore_transcript(self):
+        if not self.session_id:
+            return
+        try:
+            with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+        except Exception:
+            return
+        if not text:
+            return
+        self.answer_box.config(state="normal")
+        self.answer_box.insert("end", text)
+        self.answer_box.insert("end", "\n\n--- resumed above from before the app last closed ---\n\n")
+        self.answer_box.see("end")
+        self.answer_box.config(state="disabled")
 
     def _show_location_button(self, payload):
         """Replaces a [MAPLOC ...] tag (already visible from streaming -- it
@@ -2114,6 +2163,10 @@ class ClaudeOverlay:
         if self.session_id is None:
             self.session_id = str(uuid.uuid4())
             cmd += ["--session-id", self.session_id]
+            # Persisted immediately (not just on quit) so a crash or a hard
+            # kill mid-conversation still resumes correctly next launch.
+            self.settings["session_id"] = self.session_id
+            save_settings(self.settings)
         else:
             cmd += ["--resume", self.session_id]
 
