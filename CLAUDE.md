@@ -196,6 +196,23 @@ the visible text and turned into UI:
     couple seconds after it exits. No admin rights needed, since it's all
     under `%LOCALAPPDATA%`.
 
+17. **`GetItemInfo` is `nil` on WoW Forever** -- shipped in v1.1.0 without
+    verifying it first (unlike `C_QuestLog`/`C_Container`, which WERE
+    checked against QuestMaster's source beforehand), and it caused a real
+    in-game Lua error on every login/reload once a player had gear equipped
+    ("...ClaudeContext.lua:175: attempt to call a nil value"). The line
+    number pinpointed it exactly: `GetInventorySlotInfo` and
+    `GetInventoryItemLink` both ran fine (a real item link came back), only
+    the very next call -- `GetItemInfo(itemLink)` -- was calling a nil
+    global. Fixed with `GetItemDisplayInfo()`: try `C_Item.GetItemInfo`
+    first, then the classic global, then fall back to the raw item link if
+    neither exists, wrapped in `pcall` so even a surprising error from
+    whichever API *does* exist can't crash the sync. **Lesson**: the
+    "foundational, predates-the-overhaul" reasoning that justified skipping
+    verification for this one was wrong -- verify every WoW global against a
+    reference addon before shipping, no matter how safe it seems, the same
+    way `C_QuestLog`/`C_Container`/waypoints already were.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)

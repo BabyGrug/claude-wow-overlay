@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.1.6
+- Fixed a real in-game Lua error introduced in v1.1.0 ("Claude Context sync
+  failed: ...ClaudeContext.lua:175: attempt to call a nil value") that hit
+  on every login/reload once a player had gear equipped. `GetItemInfo`
+  turned out to be `nil` on WoW Forever, unlike the quest-log/bags APIs
+  which were verified against a reference addon before shipping -- this one
+  wasn't. Equipped-gear and bag-item names now try `C_Item.GetItemInfo`,
+  then the classic global, then fall back to the raw item link, and never
+  crash the sync regardless of which (if any) is available.
+
 ## v1.1.5
 - The update download now genuinely resumes after a dropped connection
   (confirmed the CDN honors HTTP Range requests) instead of restarting from

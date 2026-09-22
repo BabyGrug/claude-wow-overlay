@@ -164,6 +164,26 @@ local EQUIP_SLOTS = {
     {"RangedSlot", "Ranged"},
 }
 
+-- Best-effort item name/ilvl lookup. GetItemInfo turned out to be NIL on
+-- this client -- confirmed the hard way (a real "attempt to call a nil
+-- value" in-game on load/reload, unlike C_QuestLog/C_Container which were
+-- verified against QuestMaster's source before shipping). Tries the modern
+-- C_Item table first, then the classic global, then just falls back to the
+-- raw link -- same defensive-across-API-surfaces approach QuestMaster's own
+-- code uses for functions it isn't sure about either.
+local function GetItemDisplayInfo(itemLink)
+    if not itemLink then return nil, nil end
+    local getInfo = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+    if not getInfo then
+        return itemLink, nil
+    end
+    local ok, name, _, _, ilvl = pcall(getInfo, itemLink)
+    if not ok or not name then
+        return itemLink, nil
+    end
+    return name, ilvl
+end
+
 local function CollectEquipped()
     local items = {}
     for _, entry in ipairs(EQUIP_SLOTS) do
@@ -172,12 +192,10 @@ local function CollectEquipped()
         if slotId then
             local itemLink = GetInventoryItemLink("player", slotId)
             if itemLink then
-                local name, _, _, ilvl = GetItemInfo(itemLink)
+                local name, ilvl = GetItemDisplayInfo(itemLink)
                 table.insert(items, {
                     slot = label,
-                    -- GetItemInfo can return nil if the item isn't cached
-                    -- client-side yet -- the raw link is still something.
-                    name = name or itemLink,
+                    name = name,
                     ilvl = ilvl,
                 })
             end
@@ -231,8 +249,8 @@ local function CollectBagsAndGold()
                 itemLink = GetContainerItemLink(bag, slot)
             end
             if itemLink then
-                local name = GetItemInfo(itemLink)
-                table.insert(itemNames, name or itemLink)
+                local name = GetItemDisplayInfo(itemLink)
+                table.insert(itemNames, name)
             end
         end
     end
