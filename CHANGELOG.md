@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.2.6
+- Fixed every question failing with "[failed to run claude.exe: [WinError 2]
+  The system cannot find the file specified]" after the Claude desktop app
+  updated itself while the overlay was left running. The overlay looked up
+  claude.exe once at startup and kept using that path, but the path
+  includes the CLI's version number and the desktop app deletes old version
+  folders when it updates. It now re-finds it automatically whenever the
+  saved path has gone stale (or was never found at startup), retrying
+  briefly in case the app is mid-update, and only shows a plain-language
+  message if it genuinely can't be found -- no more raw Windows error text,
+  and nothing anyone needs to report or restart to fix.
+
 ## v1.2.5
 - Fixed the addon showing "Incompatible" and never loading on Retail. The
   guessed Retail interface range from v1.2.1 (110000-110207) was wrong --

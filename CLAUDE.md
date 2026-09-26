@@ -310,6 +310,28 @@ the visible text and turned into UI:
     give the model the per-turn context to fall back on, or in this case,
     just don't force a single choice into the frozen part at all.
 
+21. **The cached `claude.exe` path goes stale whenever the Claude desktop
+    app auto-updates.** `find_claude_exe()`'s result embeds the CLI's
+    version (`...\claude-code\2.1.281\claude.exe`) and the desktop app rolls
+    that forward and deletes old version folders on its own -- confirmed
+    directly: 2.1.280 and 2.1.281 folders both on disk, days apart. The
+    overlay used to resolve it once at startup and cache it forever, so an
+    overlay left running across an update failed EVERY question with a raw
+    `[WinError 2] The system cannot find the file specified` until
+    restarted -- and the people hitting it (guildmates) can't be expected to
+    report or diagnose that. Now `_locate_claude_exe()` re-resolves it on
+    the worker thread whenever the cached path is missing/not a file (3
+    tries, 1.5s apart, in case the app is mid-update and the new folder
+    isn't there yet), plus one retry if `Popen` itself raises
+    `FileNotFoundError` (path vanished between the check and the launch).
+    Only shows a plain-language message if it genuinely can't be found.
+    **General rule for this app**: anything that can fail on a machine we'll
+    never see should recover on its own or explain itself in plain language
+    -- "report it to me" isn't a real option for most users. Note
+    `_start_query` no longer refuses when `claude_exe` is `None`; the
+    recovery lives in `_run_claude` because it may need to sleep, and must
+    never block the Tk thread.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)

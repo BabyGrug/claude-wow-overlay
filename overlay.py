@@ -146,7 +146,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 
 
 def _icon_path():
@@ -2297,14 +2297,33 @@ class ClaudeOverlay:
         self.root.wait_window(sel)
         return state["result"]
 
-    def _start_query(self, question, screenshot_path=None):
-        if self.claude_exe is None:
-            self._append_answer(
-                "Can't find claude.exe -- is the Claude desktop app installed?",
-                tag="error",
-            )
-            return
+    def _locate_claude_exe(self, attempts=3, delay=1.5) -> bool:
+        """(Re-)resolve claude.exe and cache it on self. Blocking -- may sleep
+        between attempts -- so only ever call this from a worker thread.
 
+        The path find_claude_exe() returns includes the CLI's version number
+        (...\\claude-code\\2.1.281\\claude.exe), and the Claude desktop app
+        rolls that forward and deletes old version folders on its own
+        auto-updates -- confirmed directly (2.1.280 and 2.1.281 were both on
+        disk, days apart). An overlay left running across one of those
+        updates kept launching a path that no longer existed and every
+        question failed with a raw "[WinError 2] The system cannot find the
+        file specified". Guildmates can't be expected to diagnose that, so
+        this re-finds it instead. A few short retries because the app can be
+        mid-update, with the new version folder not there yet."""
+        for attempt in range(attempts):
+            try:
+                self.claude_exe = find_claude_exe()
+                self.claude_exe_error = None
+                return True
+            except FileNotFoundError as exc:
+                self.claude_exe = None
+                self.claude_exe_error = str(exc)
+                if attempt < attempts - 1:
+                    time.sleep(delay)
+        return False
+
+    def _start_query(self, question, screenshot_path=None):
         label = f"You: {question}" + (" \U0001F4F7" if screenshot_path else "")
         self._append_answer(label)
         self._stopped_by_user = False
@@ -2333,6 +2352,24 @@ class ClaudeOverlay:
         if self._stopped_by_user:
             self.ui_queue.put(("done", None))
             return
+
+        # Self-heal a stale/missing claude.exe path before building the
+        # command -- see _locate_claude_exe for why this happens.
+        if not self.claude_exe or not os.path.isfile(self.claude_exe):
+            self.ui_queue.put(("status", "Reconnecting to Claude..."))
+            if not self._locate_claude_exe():
+                self.ui_queue.put((
+                    "answer",
+                    (
+                        "Claude: [can't find the Claude desktop app] It may be "
+                        "in the middle of updating -- wait a minute and try "
+                        "again. If it keeps happening, make sure the Claude "
+                        "desktop app is installed and has been opened once.",
+                        "error",
+                    ),
+                ))
+                self.ui_queue.put(("done", None))
+                return
 
         # The context block goes in the per-turn PROMPT, not
         # --append-system-prompt: on a --resume call the CLI silently ignores
@@ -2373,20 +2410,41 @@ class ClaudeOverlay:
         else:
             cmd += ["--resume", self.session_id]
 
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception as exc:
-            self.ui_queue.put(("answer", (f"Claude: [failed to run claude.exe: {exc}]", "error")))
-            self.ui_queue.put(("done", None))
-            return
+        # One retry after re-locating, for the narrow race where the path was
+        # valid at the isfile() check above but vanished before launch (the
+        # desktop app cleaning up an old version folder mid-question).
+        proc = None
+        for attempt in range(2):
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                break
+            except FileNotFoundError:
+                if attempt == 0 and self._locate_claude_exe():
+                    cmd[0] = self.claude_exe
+                    continue
+                self.ui_queue.put((
+                    "answer",
+                    (
+                        "Claude: [can't find the Claude desktop app] It may be "
+                        "in the middle of updating -- wait a minute and try "
+                        "again.",
+                        "error",
+                    ),
+                ))
+                self.ui_queue.put(("done", None))
+                return
+            except Exception as exc:
+                self.ui_queue.put(("answer", (f"Claude: [failed to run claude.exe: {exc}]", "error")))
+                self.ui_queue.put(("done", None))
+                return
 
         self._current_proc = proc
         if self._stopped_by_user:
