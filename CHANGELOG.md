@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.7
+- The box now shows itself when you launch the app, instead of starting
+  hidden until you press the hotkey. Launching it from the shortcut and
+  seeing nothing happen looked exactly like it had failed to start, when it
+  was actually running the whole time. (It already did this right after an
+  update; now every launch does.) The hotkey and the X still hide/show it
+  the same as before.
+
 ## v1.2.6
 - Fixed every question failing with "[failed to run claude.exe: [WinError 2]
   The system cannot find the file specified]" after the Claude desktop app

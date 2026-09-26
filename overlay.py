@@ -146,7 +146,7 @@ def force_foreground(hwnd: int):
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.7"
 
 
 def _icon_path():
@@ -988,7 +988,7 @@ class ClaudeOverlay:
 
         self._build_ui()
         self._restore_transcript()
-        self.root.withdraw()  # start hidden; hotkey brings it up
+        self.root.withdraw()  # hidden only while the rest of startup runs -- shown below
 
         self.root.after(100, self._drain_ui_queue)
         self._register_hotkey()
@@ -1009,6 +1009,13 @@ class ClaudeOverlay:
         # exact spot the update button itself would show.
         if "--updated" in sys.argv[1:]:
             self.root.after(200, self._show_just_updated)
+
+        # Visible on every launch, not only right after an update. It used to
+        # start hidden until the hotkey was pressed, so launching it from the
+        # shortcut and seeing nothing happen looked exactly like it had
+        # failed to start -- it was running the whole time. Deferred so this
+        # runs inside the mainloop, after the rest of startup has finished.
+        self.root.after(200, self.show)
 
         self.tray_icon = None
         self._setup_tray_icon()
