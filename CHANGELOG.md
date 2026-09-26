@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.2.8
+- Only one copy of the app can run at a time. Launching it again while it's
+  already running now brings the existing window forward instead of starting
+  a duplicate (a duplicate double-registered the hotkeys, so one keypress
+  toggled two windows, and added a second tray icon). If the running copy
+  is frozen and doesn't respond, the second launch says so in plain words
+  and what to do about it, instead of silently doing nothing. A crashed or
+  force-closed copy can never leave a stale lock behind -- Windows releases
+  it the moment the process ends.
+
 ## v1.2.7
 - The box now shows itself when you launch the app, instead of starting
   hidden until you press the hotkey. Launching it from the shortcut and

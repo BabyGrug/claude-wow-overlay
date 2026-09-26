@@ -144,9 +144,101 @@ def force_foreground(hwnd: int):
             user32.AttachThreadInput(fg_thread, cur_thread, False)
     return ok and user32.GetForegroundWindow() == hwnd
 
+
+# ============================================================================
+# Single instance -- launching a second copy brings the running one forward
+# instead of starting a duplicate. A duplicate double-registers the global
+# hotkeys (so one keypress toggles both windows) and the tray icon, and once
+# launching shows the window it would stack a second one on top of the first.
+#
+# A named mutex, not a lock file or a port: the OS releases it the instant
+# the owning process dies for ANY reason (crash, Task Manager, power loss), so
+# a stale lock can never block the next launch. Two auto-reset events carry
+# the "please show yourself" request and the running copy's acknowledgement.
+# If nothing acknowledges (the running copy is hung), the second launch says
+# so in plain words rather than silently doing nothing -- which would look
+# exactly like the app failing to start.
+#
+# Called from __main__ only, never from ClaudeOverlay.__init__, so test
+# scripts can build ClaudeOverlay instances freely while the real app runs.
+# "Local\\" scopes everything to the current Windows session, so two users
+# on the same PC each get their own copy.
+# ============================================================================
+
+_SINGLE_INSTANCE_MUTEX = "Local\\ClaudeWowOverlay.SingleInstance"
+_SHOW_REQUEST_EVENT = "Local\\ClaudeWowOverlay.ShowRequest"
+_SHOW_ACK_EVENT = "Local\\ClaudeWowOverlay.ShowAck"
+_ERROR_ALREADY_EXISTS = 183
+_WAIT_OBJECT_0 = 0
+
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.CreateMutexW.restype = ctypes.c_void_p
+_k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+_k32.CreateEventW.restype = ctypes.c_void_p
+_k32.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p]
+_k32.SetEvent.argtypes = [ctypes.c_void_p]
+_k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+_k32.WaitForSingleObject.restype = ctypes.c_uint32
+
+# Handles live here for the whole life of the process -- the mutex only stays
+# owned as long as its handle stays open.
+_instance_lock = {}
+
+
+def _notify_already_running():
+    user32.MessageBoxW(
+        0,
+        "Claude WoW Overlay is already running, but it didn't respond.\n\n"
+        "If you can't see it, try its show/hide hotkey. If that does nothing "
+        "either, end \"ClaudeWowOverlay.exe\" in Task Manager and launch it "
+        "again.",
+        "Claude WoW Overlay",
+        0x40,  # MB_ICONINFORMATION
+    )
+
+
+def acquire_single_instance(ack_timeout_ms=5000) -> bool:
+    """True if this is the only copy (it now owns the lock and should carry
+    on starting up). False if another copy is already running -- in which
+    case it has been asked to show itself, and the caller should just exit.
+    Fails open (True) if anything about the mechanism itself goes wrong: a
+    duplicate copy is a far smaller problem than an app that won't launch."""
+    try:
+        ctypes.set_last_error(0)
+        mutex = _k32.CreateMutexW(None, False, _SINGLE_INSTANCE_MUTEX)
+        already_running = ctypes.get_last_error() == _ERROR_ALREADY_EXISTS
+        show_evt = _k32.CreateEventW(None, False, False, _SHOW_REQUEST_EVENT)
+        ack_evt = _k32.CreateEventW(None, False, False, _SHOW_ACK_EVENT)
+        if not mutex or not show_evt or not ack_evt:
+            return True
+        if not already_running:
+            _instance_lock.update(mutex=mutex, show=show_evt, ack=ack_evt)
+            return True
+        _k32.SetEvent(show_evt)
+        acked = _k32.WaitForSingleObject(ack_evt, ack_timeout_ms) == _WAIT_OBJECT_0
+    except Exception:
+        return True
+    if not acked:
+        _notify_already_running()
+    return False
+
+
+def consume_show_request() -> bool:
+    """True if a second launch has asked this (running) copy to show itself.
+    Auto-reset event, so each request is seen exactly once."""
+    handle = _instance_lock.get("show")
+    return bool(handle) and _k32.WaitForSingleObject(handle, 0) == _WAIT_OBJECT_0
+
+
+def ack_show_request():
+    handle = _instance_lock.get("ack")
+    if handle:
+        _k32.SetEvent(handle)
+
+
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 
 
 def _icon_path():
@@ -1016,6 +1108,12 @@ class ClaudeOverlay:
         # failed to start -- it was running the whole time. Deferred so this
         # runs inside the mainloop, after the rest of startup has finished.
         self.root.after(200, self.show)
+
+        # Only when launched through __main__'s single-instance guard (see
+        # acquire_single_instance) -- lets a second launch ask this copy to
+        # come forward. Test scripts that build instances directly skip it.
+        if _instance_lock:
+            self.root.after(250, self._poll_show_request)
 
         self.tray_icon = None
         self._setup_tray_icon()
@@ -1905,6 +2003,19 @@ class ClaudeOverlay:
     def hide(self):
         self.root.withdraw()
 
+    def _poll_show_request(self):
+        """A second launch of the app asks this copy to come forward instead
+        of starting a duplicate. Always show (never toggle) -- someone
+        re-launching it wants to see it, even if it's already open."""
+        try:
+            if consume_show_request():
+                self.show()
+                ack_show_request()
+        finally:
+            # try/finally so a failure in show() still gets logged by the Tk
+            # exception hook AND the poll keeps running for the next request.
+            self.root.after(250, self._poll_show_request)
+
     def quit(self):
         try:
             self.settings["window_x"] = self.root.winfo_x()
@@ -2604,6 +2715,10 @@ class ClaudeOverlay:
 
 
 if __name__ == "__main__":
+    # Before anything else starts (Tk, hotkeys, tray icon) -- a second copy
+    # should do nothing but ask the first to come forward, then leave.
+    if not acquire_single_instance():
+        sys.exit(0)
     try:
         app = ClaudeOverlay()
         app.run()

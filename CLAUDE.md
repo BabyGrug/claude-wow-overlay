@@ -332,6 +332,30 @@ the visible text and turned into UI:
     recovery lives in `_run_claude` because it may need to sleep, and must
     never block the Tk thread.
 
+22. **Single instance (v1.2.8) -- and why it's built the way it is.**
+    Before this, launching the app twice started two full copies (two
+    hotkey registrations, two tray icons; four `ClaudeWowOverlay` processes
+    were seen on the dev machine -- a onefile exe is TWO processes per copy,
+    so count 2 per running copy, not 1). Chosen UX: a second launch asks the
+    running copy to show itself and exits. Alternatives rejected: silently
+    exiting (looks like the app failed to start -- the exact problem v1.2.7
+    fixed), an "already running" error (makes the user do the work), killing
+    the first copy (loses a conversation that may be mid-answer).
+    Mechanics (`acquire_single_instance` and friends in `overlay.py`): a
+    named **mutex**, deliberately not a lock file or port -- Windows
+    releases it the moment the owner dies for any reason, so a stale lock
+    can never block a launch (verified: kill -9 the owner, next launch
+    acquires). Two auto-reset **events** carry the show request and the
+    ack. No ack within 5s (running copy hung) -> a plain-language message
+    box rather than silent nothing. **Fails open**: if the mechanism itself
+    errors, launch normally -- a duplicate beats an app that won't start.
+    `Local\` names scope it per Windows session. The guard is called from
+    `__main__` ONLY, never `ClaudeOverlay.__init__`, so test scripts can
+    build instances while the real app is running (the polling hook in
+    `__init__` is gated on `_instance_lock` being populated for the same
+    reason). Real-kernel-object, real-second-process tests (with uniquely
+    named objects) are the way to test this -- mocking would prove nothing.
+
 ## Testing patterns established on this project
 
 - **Lua**: use the `lupa` package (a real Lua runtime, callable from Python)
