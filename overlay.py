@@ -1,5 +1,5 @@
 r"""
-Floating always-on-top Claude Q&A box, meant to sit on top of WoW (or anything
+Floating always-on-top Grok Q&A box, meant to sit on top of WoW (or anything
 else) in Windowed / Borderless-Windowed mode.
 
 Press the hotkey (default: Ctrl+Shift+Space) anywhere to show/hide the box.
@@ -10,30 +10,26 @@ Requires WoW to run in Windowed or Borderless Windowed mode -- nothing can
 draw on top of a true exclusive-fullscreen game.
 
 One-time setup before this works:
-    The desktop app is MSIX-packaged, so its bundled claude.exe actually
-    lives under AppData\Local\Packages\...\LocalCache\, not the plain
-    AppData\Roaming path Get-Process reports (that path only resolves from
-    inside the app's own container). This script searches both locations.
+    Create an xAI API key at https://console.x.ai (API Keys page) and save
+    it permanently (then restart the overlay):
+        setx XAI_API_KEY "xai-..."
+    The installer does this for you. xAI doesn't offer a "sign in with
+    Grok/X" OAuth flow for third-party apps, so an API key is the supported
+    way in -- usage is billed to your own xAI account.
 
-    The desktop app's login also doesn't carry over to a freestanding
-    claude.exe process. In your own terminal, run:
-        claude setup-token
-    and follow the browser prompt -- it prints a long-lived token. Save it
-    permanently with (then open a NEW terminal / reboot the overlay):
-        setx CLAUDE_CODE_OAUTH_TOKEN "paste-the-token-here"
-
-Runs on Sonnet 5 at low effort, restricted to just the WebSearch tool (cuts
-both cost and context bloat versus the full default toolset). Every question
-is answered with live status ("Searching the web...", etc.) streamed into the
-status line, and the answer itself streams into the box as it's generated --
-see _run_claude() / TOOL_STATUS_LABELS.
+Talks directly to xAI's Responses API (https://api.x.ai/v1/responses) on
+grok-4.7 with the server-side web_search tool. Every question is answered
+with live status ("Searching the web...", etc.) streamed into the status
+line, and the answer itself streams into the box as it's generated -- see
+_run_grok() / TOOL_STATUS_LABELS.
 
 If the companion "ClaudeContext" WoW addon is installed and the character has
 done at least one /reload, this also reads that addon's SavedVariables file
-(character, location, quest log) and feeds it to Claude as context on every
+(character, location, quest log) and feeds it to Grok as context on every
 question -- see find_wow_context_file() / read_wow_context().
 """
 
+import base64
 import ctypes
 import datetime
 import glob
@@ -50,7 +46,6 @@ import tkinter as tk
 import traceback
 import urllib.error
 import urllib.request
-import uuid
 from tkinter import font as tkfont
 
 import keyboard
@@ -159,8 +154,8 @@ def force_foreground(hwnd: int):
 # so in plain words rather than silently doing nothing -- which would look
 # exactly like the app failing to start.
 #
-# Called from __main__ only, never from ClaudeOverlay.__init__, so test
-# scripts can build ClaudeOverlay instances freely while the real app runs.
+# Called from __main__ only, never from GrokOverlay.__init__, so test
+# scripts can build GrokOverlay instances freely while the real app runs.
 # "Local\\" scopes everything to the current Windows session, so two users
 # on the same PC each get their own copy.
 # ============================================================================
@@ -188,11 +183,11 @@ _instance_lock = {}
 def _notify_already_running():
     user32.MessageBoxW(
         0,
-        "Claude WoW Overlay is already running, but it didn't respond.\n\n"
+        "Grok WoW Overlay is already running, but it didn't respond.\n\n"
         "If you can't see it, try its show/hide hotkey. If that does nothing "
         "either, end \"ClaudeWowOverlay.exe\" in Task Manager and launch it "
         "again.",
-        "Claude WoW Overlay",
+        "Grok WoW Overlay",
         0x40,  # MB_ICONINFORMATION
     )
 
@@ -238,7 +233,7 @@ def ack_show_request():
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.3.0"
 
 
 def _icon_path():
@@ -253,7 +248,7 @@ def _icon_path():
 # ============================================================================
 # Settings -- persisted per-user, editable from the in-app Settings dialog.
 # Everything here is a DEFAULT; the running values live in self.settings on
-# the ClaudeOverlay instance, loaded from disk at startup and saved whenever
+# the GrokOverlay instance, loaded from disk at startup and saved whenever
 # the Settings dialog is confirmed, or the window moves/resizes.
 # ============================================================================
 
@@ -261,8 +256,11 @@ SETTINGS_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "settings.json"
 )
 
+# Grok model used for every question -- see https://docs.x.ai/docs/models
+XAI_DEFAULT_MODEL = "grok-4.7"
+
 DEFAULT_SETTINGS = {
-    "model": "sonnet",
+    "model": XAI_DEFAULT_MODEL,
     "effort": "medium",
     "hotkey": "ctrl+shift+space",
     "screenshot_hotkey": "ctrl+shift+s",
@@ -272,11 +270,12 @@ DEFAULT_SETTINGS = {
     "window_h": WINDOW_H,
     "seen_first_run_tips": False,
     # Persisted so closing/reopening the app (including an update's own
-    # relaunch) resumes the same claude.exe conversation instead of quietly
+    # relaunch) resumes the same the API conversation instead of quietly
     # starting a new one every time -- that was never a deliberate choice,
     # just something nobody had persisted yet. "New" is still the explicit
     # way to reset both this and the visible transcript below.
     "session_id": None,
+    "session_backend": "xai",
 }
 
 TRANSCRIPT_PATH = os.path.join(
@@ -291,10 +290,10 @@ SETUP_EXE_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", "."), "ClaudeWowOverlay", "ClaudeWowOverlaySetup.exe"
 )
 
-# Model is fixed to Sonnet -- not user-selectable. (value, label) -- label is
-# what the Settings dialog shows; value is what gets passed to claude.exe's
-# --effort flag. Effort choices are a curated subset of the 5 the CLI
-# supports (low/medium/high/xhigh/max) -- xhigh/max omitted from the UI as
+# Model is fixed to XAI_DEFAULT_MODEL -- not user-selectable. (value, label) --
+# label is what the Settings dialog shows; value is what gets sent as the
+# Responses API's reasoning.effort. Effort choices are a curated subset of
+# what Grok supports (low/medium/high/xhigh) -- xhigh omitted from the UI as
 # overkill for this app and a surprise-cost risk for casual users.
 EFFORT_CHOICES = [
     ("low", "Low -- fastest, cheapest"),
@@ -311,10 +310,15 @@ def load_settings() -> dict:
                 settings.update(json.load(f))
         except Exception:
             pass
-    # Model is no longer user-selectable -- always Sonnet, even overriding
-    # whatever an older version of the Settings dialog may have saved for an
-    # install that previously had Opus or Fable picked.
-    settings["model"] = "sonnet"
+    # Model is not user-selectable -- always XAI_DEFAULT_MODEL, even
+    # overriding whatever an older (Claude-based) version may have saved.
+    settings["model"] = XAI_DEFAULT_MODEL
+    # A session_id saved by the old Claude-based versions is a claude.exe
+    # session UUID, meaningless to xAI -- drop it once so the first question
+    # after upgrading starts a fresh Grok conversation.
+    if settings.get("session_backend") != "xai":
+        settings["session_id"] = None
+        settings["session_backend"] = "xai"
     return settings
 
 
@@ -495,16 +499,16 @@ def cleanup_old_screenshots(max_age_hours=SCREENSHOT_MAX_AGE_HOURS):
             pass
 
 # Friendlier status-line text for tool_use blocks the model streams back.
-# Anything not listed here falls back to f"Using {name}..." in _run_claude.
+# Anything not listed here falls back to f"Using {name}..." in _run_grok.
 TOOL_STATUS_LABELS = {
-    "ToolSearch": "Looking up search tool...",
-    "WebSearch": "Searching the web...",
+    "web_search": "Searching the web...",
+    "x_search": "Searching X...",
 }
 
-# Matches a trailing tag Claude emits when it has a specific in-game map
+# Matches a trailing tag Grok emits when it has a specific in-game map
 # location, e.g. [MAPLOC zone="Loch Modan" x=47.2 y=52.1] -- turned into a
-# "Copy location" button that puts /claudemark <zone> <x> <y> on the
-# clipboard, ready to paste into WoW chat. See _run_claude / _location_found.
+# "Copy location" button that puts /grokmark <zone> <x> <y> on the
+# clipboard, ready to paste into WoW chat. See _run_grok / _location_found.
 LOCATION_TAG_RE = re.compile(
     r'\[MAPLOC\s+zone="([^"]*)"\s+x=([\d.]+)\s+y=([\d.]+)\]', re.IGNORECASE
 )
@@ -527,9 +531,9 @@ def _current_game_version_for_prompt() -> str:
 
 
 def build_system_prompt() -> str:
-    """Static behavior/tone instructions. --append-system-prompt only actually
-    takes effect on the turn that CREATES a session (--session-id) -- on every
-    --resume turn after that it's silently ignored by the CLI, so anything
+    """Static behavior/tone instructions. Only sent on the turn that STARTS a
+    conversation -- every later turn chains onto it via previous_response_id
+    and never re-sends it, so anything
     that can change turn-to-turn (the date, WoW context) must NOT live here or
     it'll freeze at whatever was true on message 1 for the rest of that
     session. Only put things here that are fine to fix for the session's
@@ -615,7 +619,7 @@ def build_system_prompt() -> str:
         "time has passed. If the player's own description conflicts with the "
         "context, the context looks more than a few minutes old for a "
         "coordinate-sensitive question, or it's missing entirely, say so "
-        "plainly and suggest they type /reload in-game (or /claudesync then "
+        "plainly and suggest they type /reload in-game (or /groksync then "
         "/reload if they haven't set up the addon) rather than silently "
         "trusting stale data or silently answering as if you have none.\n\n"
         "Whenever your answer includes a SPECIFIC, CONFIDENT in-game map "
@@ -633,8 +637,8 @@ def build_system_prompt() -> str:
         "zone\" or when multiple candidate locations exist and you're not "
         "sure which one is right.\n\n"
         "Sometimes a message starts with a bracketed note that a screenshot "
-        "was just taken and saved to a path -- when you see that, use your "
-        "Read tool on that exact path before doing anything else, since the "
+        "of the player's screen is attached -- when you see that, look at "
+        "the attached image carefully before doing anything else, since the "
         "player's real question is almost always about what's actually on "
         "their screen right now (e.g. comparing quest reward items, "
         "identifying an NPC, reading a tooltip). Describe what you see only "
@@ -672,7 +676,7 @@ def build_system_prompt() -> str:
 
 def build_turn_context() -> str:
     """Date + WoW addon context, freshly read on EVERY call (unlike the system
-    prompt above) and prepended to the actual question text -- see _run_claude.
+    prompt above) and prepended to the actual question text -- see _run_grok.
     This is the part that must never go stale mid-conversation."""
     today = datetime.date.today().strftime("%Y-%m-%d")
     parts = [f"[context] Today's date is {today}."]
@@ -880,7 +884,7 @@ def format_wow_context(data: dict) -> str:
 
 
 # ============================================================================
-# Per-character saved notes -- Claude's own persistent memory, distinct from
+# Per-character saved notes -- Grok's own persistent memory, distinct from
 # the live WoW addon context above. Populated automatically via a [SAVENOTE]
 # tag the model emits (see build_system_prompt), so repeat questions like
 # "what's my stat priority again" don't need a fresh web search every time.
@@ -978,67 +982,129 @@ def get_current_character_identity():
 
 
 def _internet_available(timeout: float = 3.0) -> bool:
-    """A quick TCP handshake to the exact host claude.exe itself needs to
-    reach -- not a generic ping target. Run this before spawning the CLI so
+    """A quick TCP handshake to the exact host the API itself needs to
+    reach -- not a generic ping target. Run this before calling the API so
     a genuinely offline player gets an immediate, honest "you're offline"
-    message instead of waiting out the full subprocess timeout and then
-    having to guess what the CLI's own network-failure text looks like."""
+    message instead of waiting out a long HTTP timeout."""
     try:
-        socket.create_connection(("api.anthropic.com", 443), timeout=timeout).close()
+        socket.create_connection(("api.x.ai", 443), timeout=timeout).close()
         return True
     except OSError:
         return False
 
 
-def find_claude_exe() -> str:
-    """Locate the bundled Claude Code CLI, preferring the newest version.
+# ============================================================================
+# xAI Grok API (Responses API -- https://docs.x.ai)
+# ============================================================================
 
-    The desktop app is MSIX-packaged. A plain external process (this script)
-    can't see the app's virtualized %APPDATA%\\Roaming\\Claude\\claude-code
-    path -- that only resolves from inside the app's own container. The real,
-    externally-reachable copy lives under the package's LocalCache instead.
-    """
-    localappdata = os.environ.get("LOCALAPPDATA", "")
-    appdata = os.environ.get("APPDATA", "")
-    patterns = [
-        os.path.join(localappdata, "Packages", "*Claude*", "LocalCache",
-                     "Roaming", "Claude", "claude-code", "*", "claude.exe"),
-        os.path.join(appdata, "Claude", "claude-code", "*", "claude.exe"),
-    ]
-    candidates = []
-    for pattern in patterns:
-        candidates.extend(glob.glob(pattern))
-    if not candidates:
-        raise FileNotFoundError(
-            "Could not find claude.exe under AppData\\Local\\Packages\\*Claude*\\"
-            "LocalCache\\Roaming\\Claude\\claude-code\\. Is the Claude desktop "
-            "app installed?"
-        )
+XAI_API_BASE = "https://api.x.ai/v1"
+XAI_RESPONSES_URL = f"{XAI_API_BASE}/responses"
+XAI_REQUEST_TIMEOUT = 300  # seconds; web-search turns can take a while
 
-    def version_key(path: str):
-        version = os.path.basename(os.path.dirname(path))
-        parts = []
-        for chunk in version.split("."):
-            try:
-                parts.append(int(chunk))
-            except ValueError:
-                parts.append(0)
-        return tuple(parts)
-
-    candidates.sort(key=version_key, reverse=True)
-    return candidates[0]
+MISSING_KEY_MESSAGE = (
+    "No working xAI API key. Create one at https://console.x.ai (API Keys "
+    "page), then run the setup again, or set it yourself with:\n"
+    '    setx XAI_API_KEY "xai-..."\n'
+    "and restart the overlay."
+)
 
 
-class ClaudeOverlay:
+def get_xai_api_key():
+    """The user's own xAI API key, from the XAI_API_KEY environment variable.
+    On Windows a value saved with `setx` (what the installer does) only shows
+    up in os.environ for processes started afterwards, so fall back to
+    reading the user's registry environment directly."""
+    key = os.environ.get("XAI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as reg:
+            value, _ = winreg.QueryValueEx(reg, "XAI_API_KEY")
+            return (value or "").strip() or None
+    except Exception:
+        return None
+
+
+class _StreamHandle:
+    """Gives stop_query() the same .terminate() it used on the old
+    the API Popen: closing the HTTP response aborts the stream."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def terminate(self):
+        try:
+            self._resp.close()
+        except Exception:
+            pass
+
+
+def _iter_sse_events(resp):
+    """Yields parsed JSON objects from a server-sent-events HTTP stream."""
+    data_lines = []
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            if data_lines:
+                data = "\n".join(data_lines)
+                data_lines = []
+                if data.strip() == "[DONE]":
+                    return
+                try:
+                    yield json.loads(data)
+                except json.JSONDecodeError:
+                    pass
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    if data_lines:
+        try:
+            yield json.loads("\n".join(data_lines))
+        except json.JSONDecodeError:
+            pass
+
+
+def _response_output_text(response: dict) -> str:
+    parts = []
+    for item in response.get("output") or []:
+        if item.get("type") == "message":
+            for c in item.get("content") or []:
+                if c.get("type") == "output_text":
+                    parts.append(c.get("text", ""))
+    return "".join(parts)
+
+
+def _http_error_detail(exc) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        return str(exc)
+    try:
+        parsed = json.loads(body)
+        err = parsed.get("error", parsed)
+        if isinstance(err, dict):
+            return err.get("message") or json.dumps(err)
+        return str(err)
+    except Exception:
+        return body.strip() or str(exc)
+
+
+def _image_input_from_file(path: str) -> dict:
+    """A Responses API input_image part with the screenshot inlined as a
+    base64 data URL (Grok accepts jpg/png, up to 20 MiB)."""
+    mime = "image/jpeg" if path.lower().endswith((".jpg", ".jpeg")) else "image/png"
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return {"type": "input_image", "image_url": f"data:{mime};base64,{encoded}", "detail": "high"}
+
+
+
+class GrokOverlay:
     def __init__(self):
         self.settings = load_settings()
 
-        self.claude_exe = None
-        self.claude_exe_error = None
-        try:
-            self.claude_exe = find_claude_exe()
-        except FileNotFoundError as exc:
-            self.claude_exe_error = str(exc)
+        self.api_key_error = None if get_xai_api_key() else MISSING_KEY_MESSAGE
 
         self.session_id = self.settings.get("session_id")
         self.busy = False
@@ -1054,7 +1120,7 @@ class ClaudeOverlay:
 
         self.root = tk.Tk()
         self.root.report_callback_exception = self._tk_callback_exception
-        self.root.title("Claude")
+        self.root.title("Grok")
         icon_path = _icon_path()
         if icon_path:
             try:
@@ -1087,8 +1153,8 @@ class ClaudeOverlay:
         self._active_hotkey = self.settings["hotkey"]
         self._active_screenshot_hotkey = self.settings["screenshot_hotkey"]
 
-        if self.claude_exe_error:
-            self._append_answer(f"[setup problem] {self.claude_exe_error}")
+        if self.api_key_error:
+            self._append_answer(f"[setup problem] {self.api_key_error}")
 
         if not self.settings.get("seen_first_run_tips"):
             self.root.after(300, self._show_first_run_tips)
@@ -1154,7 +1220,7 @@ class ClaudeOverlay:
         titlebar.grid_propagate(False)
 
         title_lbl = tk.Label(
-            titlebar, text="Claude", bg="#141419", fg=fg,
+            titlebar, text="Grok", bg="#141419", fg=fg,
             font=("Segoe UI", 10, "bold"), padx=10,
         )
         title_lbl.pack(side="left")
@@ -1491,7 +1557,7 @@ class ClaudeOverlay:
             font=("Segoe UI", 10, "bold"), anchor="w",
         ).pack(side="left")
         tk.Label(
-            model_row, text="Sonnet", bg=bg, fg="#9a9aa2",
+            model_row, text="Grok 4.7", bg=bg, fg="#9a9aa2",
             font=("Segoe UI", 9), anchor="e",
         ).pack(side="right")
 
@@ -1669,7 +1735,7 @@ class ClaudeOverlay:
         titlebar.pack(fill="x")
         titlebar.pack_propagate(False)
         tk.Label(
-            titlebar, text="Welcome to Claude WoW Overlay", bg=bg_dark, fg=fg,
+            titlebar, text="Welcome to Grok WoW Overlay", bg=bg_dark, fg=fg,
             font=("Segoe UI", 10, "bold"), padx=10,
         ).pack(side="left")
 
@@ -1685,16 +1751,16 @@ class ClaudeOverlay:
             ("Right-click \U0001F4F7", "Drag-select just part of the screen "
              "instead of sending the whole desktop -- good for cropping out "
              "a comparison tooltip."),
-            ("\U0001F4CD button", "Appears when Claude gives you a specific map "
+            ("\U0001F4CD button", "Appears when Grok gives you a specific map "
              "location -- click it, then paste in WoW chat to drop a waypoint."),
             ("⚙ gear icon", "Change the model, effort level, or either "
-             "hotkey, next to \"Claude\" in the title bar. Click it again "
+             "hotkey, next to \"Grok\" in the title bar. Click it again "
              "to close Settings, same as its X."),
-            ("⟲ New", "Starts a fresh conversation -- Claude forgets "
+            ("⟲ New", "Starts a fresh conversation -- Grok forgets "
              "everything asked so far. Otherwise your conversation is "
              "remembered even after closing the app, so you don't need "
              "this just to relaunch."),
-            ("Tray icon", "Claude keeps running in the system tray when "
+            ("Tray icon", "Grok keeps running in the system tray when "
              "hidden -- right-click it for Show/Hide, New, Settings, or Quit."),
             ("✕ vs Quit", "✕ just hides the box (same as the hotkey). "
              "\"Quit\" next to the title actually exits."),
@@ -1908,7 +1974,7 @@ class ClaudeOverlay:
         if last_error:
             self.ui_queue.put((
                 "answer",
-                (f"Claude: [update failed after {max_attempts} attempts] {last_error}", "error"),
+                (f"Grok: [update failed after {max_attempts} attempts] {last_error}", "error"),
             ))
             # Restore the clickable "Update to vX" state (rather than leaving
             # it stuck on "Downloading update...") so retrying doesn't need a
@@ -1921,11 +1987,11 @@ class ClaudeOverlay:
             # install and just re-verifies prerequisites + re-copies files
             # silently, relaunching the overlay when done. Only falls back
             # to the full wizard if something's actually wrong (logged out,
-            # Claude Desktop gone, etc.) -- see installer.py's
+            # API key revoked, etc.) -- see installer.py's
             # run_quiet_update().
             subprocess.Popen([installer_path, "--update"])
         except Exception as exc:
-            self.ui_queue.put(("answer", (f"Claude: [update downloaded but failed to launch] {exc}", "error")))
+            self.ui_queue.put(("answer", (f"Grok: [update downloaded but failed to launch] {exc}", "error")))
             self.ui_queue.put(("update_available", (latest, download_url)))
             self.ui_queue.put(("done", None))
             return
@@ -2069,7 +2135,7 @@ class ClaudeOverlay:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", lambda: self.ui_queue.put(("quit", None))),
         )
-        self.tray_icon = pystray.Icon("ClaudeWowOverlay", image, "Claude WoW Overlay", menu)
+        self.tray_icon = pystray.Icon("ClaudeWowOverlay", image, "Grok WoW Overlay", menu)
         try:
             self.tray_icon.run_detached()
             # Windows hides newly-added tray icons in the overflow ("^")
@@ -2089,7 +2155,7 @@ class ClaudeOverlay:
             self.tray_icon.notify(
                 "Running in the background. If you don't see the icon, "
                 "check the ˄ arrow near the clock.",
-                "Claude WoW Overlay is ready",
+                "Grok WoW Overlay is ready",
             )
         except Exception:
             pass
@@ -2101,7 +2167,7 @@ class ClaudeOverlay:
             return
         try:
             if self.root.state() == "withdrawn":
-                self.tray_icon.notify("Claude has an answer ready.", "Claude WoW Overlay")
+                self.tray_icon.notify("Grok has an answer ready.", "Grok WoW Overlay")
         except Exception:
             pass
 
@@ -2137,7 +2203,7 @@ class ClaudeOverlay:
         self.answer_box.config(state="normal")
         if self.answer_box.get("1.0", "end").strip():
             self.answer_box.insert("end", "\n\n")
-        self.answer_box.insert("end", "Claude: ")
+        self.answer_box.insert("end", "Grok: ")
         self.answer_box.see("end")
         self._streaming = True
 
@@ -2155,7 +2221,7 @@ class ClaudeOverlay:
     def _save_transcript(self):
         """Best-effort -- losing the visible history is a minor annoyance,
         never worth crashing over. Paired with session_id persistence so a
-        resumed claude.exe conversation isn't shown against a blank box."""
+        resumed the API conversation isn't shown against a blank box."""
         try:
             text = self.answer_box.get("1.0", "end")
             os.makedirs(os.path.dirname(TRANSCRIPT_PATH), exist_ok=True)
@@ -2183,7 +2249,7 @@ class ClaudeOverlay:
     def _show_location_button(self, payload):
         """Replaces a [MAPLOC ...] tag (already visible from streaming -- it
         streamed in like any other text before we knew it was a tag) with a
-        clickable button that copies /claudemark <zone> <x> <y> to the
+        clickable button that copies /grokmark <zone> <x> <y> to the
         clipboard, ready to paste into WoW chat."""
         raw_tag = payload["raw_tag"]
         zone = payload["zone"]
@@ -2207,7 +2273,7 @@ class ClaudeOverlay:
         )
 
         def do_copy(event=None):
-            cmd = f"/claudemark {zone} {x} {y}".strip()
+            cmd = f"/grokmark {zone} {x} {y}".strip()
             self.root.clipboard_clear()
             self.root.clipboard_append(cmd)
             self.root.update()  # makes sure the clipboard content sticks on Windows
@@ -2255,7 +2321,7 @@ class ClaudeOverlay:
             self.send()
 
     def stop_query(self):
-        """Kills the in-flight claude.exe call, if any -- lets an accidental
+        """Kills the in-flight the API call, if any -- lets an accidental
         or unwanted question be aborted instead of having to wait it out."""
         if not self.busy:
             return
@@ -2278,7 +2344,7 @@ class ClaudeOverlay:
 
     def ask_about_screen(self):
         """Hides the box, grabs every monitor, brings the box back, then asks
-        Claude to look at what it just captured. Hiding first matters -- the
+        Grok to look at what it just captured. Hiding first matters -- the
         box floats on top of the game, so without this it would screenshot
         itself sitting on top of whatever the player actually wants looked at."""
         if self.busy:
@@ -2300,7 +2366,7 @@ class ClaudeOverlay:
         self.show()
 
         if error:
-            self._append_answer(f"Claude: [error] couldn't take a screenshot: {error}", tag="error")
+            self._append_answer(f"Grok: [error] couldn't take a screenshot: {error}", tag="error")
             return
 
         self._start_query(question, screenshot_path=screenshot_path)
@@ -2324,7 +2390,7 @@ class ClaudeOverlay:
             full_img = ImageGrab.grab(all_screens=True)
         except Exception as exc:
             self.show()
-            self._append_answer(f"Claude: [error] couldn't take a screenshot: {exc}", tag="error")
+            self._append_answer(f"Grok: [error] couldn't take a screenshot: {exc}", tag="error")
             return
 
         box = self._select_region()
@@ -2339,7 +2405,7 @@ class ClaudeOverlay:
             screenshot_path = _save_screenshot(region_img)
         except Exception as exc:
             self.show()
-            self._append_answer(f"Claude: [error] couldn't take a screenshot: {exc}", tag="error")
+            self._append_answer(f"Grok: [error] couldn't take a screenshot: {exc}", tag="error")
             return
 
         self.show()
@@ -2366,7 +2432,7 @@ class ClaudeOverlay:
         canvas.pack(fill="both", expand=True)
 
         hint = tk.Label(
-            sel, text="Drag to select a region for Claude to look at -- Esc to cancel",
+            sel, text="Drag to select a region for Grok to look at -- Esc to cancel",
             bg="#1e1e24", fg="#e8e8ec", font=("Segoe UI", 10), padx=10, pady=4,
         )
         hint.place(relx=0.5, y=24, anchor="n")
@@ -2415,32 +2481,6 @@ class ClaudeOverlay:
         self.root.wait_window(sel)
         return state["result"]
 
-    def _locate_claude_exe(self, attempts=3, delay=1.5) -> bool:
-        """(Re-)resolve claude.exe and cache it on self. Blocking -- may sleep
-        between attempts -- so only ever call this from a worker thread.
-
-        The path find_claude_exe() returns includes the CLI's version number
-        (...\\claude-code\\2.1.281\\claude.exe), and the Claude desktop app
-        rolls that forward and deletes old version folders on its own
-        auto-updates -- confirmed directly (2.1.280 and 2.1.281 were both on
-        disk, days apart). An overlay left running across one of those
-        updates kept launching a path that no longer existed and every
-        question failed with a raw "[WinError 2] The system cannot find the
-        file specified". Guildmates can't be expected to diagnose that, so
-        this re-finds it instead. A few short retries because the app can be
-        mid-update, with the new version folder not there yet."""
-        for attempt in range(attempts):
-            try:
-                self.claude_exe = find_claude_exe()
-                self.claude_exe_error = None
-                return True
-            except FileNotFoundError as exc:
-                self.claude_exe = None
-                self.claude_exe_error = str(exc)
-                if attempt < attempts - 1:
-                    time.sleep(delay)
-        return False
-
     def _start_query(self, question, screenshot_path=None):
         label = f"You: {question}" + (" \U0001F4F7" if screenshot_path else "")
         self._append_answer(label)
@@ -2449,18 +2489,24 @@ class ClaudeOverlay:
         self.status_var.set("Thinking...")
 
         thread = threading.Thread(
-            target=self._run_claude, args=(question,),
+            target=self._run_grok, args=(question,),
             kwargs={"screenshot_path": screenshot_path}, daemon=True,
         )
         thread.start()
 
-    def _run_claude(self, question: str, screenshot_path=None):
+    def _run_grok(self, question: str, screenshot_path=None):
+        """Sends one question to xAI's Responses API (POST /v1/responses)
+        and streams the answer back into the box. Conversation continuity
+        uses previous_response_id (xAI stores responses server-side), kept in
+        self.session_id / settings["session_id"] exactly where the old
+        the API session id used to live, so "New" and restart-resume
+        behave the same as before."""
         self.ui_queue.put(("status", "Checking connection..."))
         if not _internet_available():
             self.ui_queue.put((
                 "answer",
                 (
-                    "Claude: [offline] Can't reach Claude's servers -- check "
+                    "Grok: [offline] Can't reach xAI's servers -- check "
                     "your internet connection and try again.",
                     "error",
                 ),
@@ -2471,242 +2517,195 @@ class ClaudeOverlay:
             self.ui_queue.put(("done", None))
             return
 
-        # Self-heal a stale/missing claude.exe path before building the
-        # command -- see _locate_claude_exe for why this happens.
-        if not self.claude_exe or not os.path.isfile(self.claude_exe):
-            self.ui_queue.put(("status", "Reconnecting to Claude..."))
-            if not self._locate_claude_exe():
-                self.ui_queue.put((
-                    "answer",
-                    (
-                        "Claude: [can't find the Claude desktop app] It may be "
-                        "in the middle of updating -- wait a minute and try "
-                        "again. If it keeps happening, make sure the Claude "
-                        "desktop app is installed and has been opened once.",
-                        "error",
-                    ),
-                ))
-                self.ui_queue.put(("done", None))
-                return
+        api_key = get_xai_api_key()
+        if not api_key:
+            self.ui_queue.put(("answer", (f"Grok: [setup problem] {MISSING_KEY_MESSAGE}", "error")))
+            self.ui_queue.put(("done", None))
+            return
 
-        # The context block goes in the per-turn PROMPT, not
-        # --append-system-prompt: on a --resume call the CLI silently ignores
-        # a new system prompt (it only applies when a session is first
-        # created), but the -p text is genuinely fresh every single call.
+        # Per-turn context goes in the user message (never the system
+        # prompt), same as before -- see build_turn_context().
         if screenshot_path:
             question = (
-                f"[A screenshot was just taken and saved to {screenshot_path} -- "
-                "use your Read tool to look at it before answering.]\n\n"
-                f"{question}"
+                "[A screenshot of the player's screen was just taken and is "
+                f"attached to this message.]\n\n{question}"
             )
         full_prompt = f"{build_turn_context()}\n\n{question}"
-        cmd = [
-            self.claude_exe,
-            "-p", full_prompt,
-            "--restricted",
-            "--allowedTools", "WebSearch,Read",
-            "--model", self.settings["model"],
-            "--effort", self.settings["effort"],
-            "--output-format", "stream-json",
-            "--include-partial-messages",
-            "--verbose",
-            "--append-system-prompt", build_system_prompt(),
-        ]
+        content = [{"type": "input_text", "text": full_prompt}]
         if screenshot_path:
-            # Read is scoped to the process's working directory by default --
-            # the screenshots folder lives under %LOCALAPPDATA%, well outside
-            # that tree, so without this Read refuses it as "outside allowed
-            # directory" (confirmed the hard way testing this just now).
-            cmd += ["--add-dir", SCREENSHOTS_DIR]
-        if self.session_id is None:
-            self.session_id = str(uuid.uuid4())
-            cmd += ["--session-id", self.session_id]
-            # Persisted immediately (not just on quit) so a crash or a hard
-            # kill mid-conversation still resumes correctly next launch.
-            self.settings["session_id"] = self.session_id
-            save_settings(self.settings)
-        else:
-            cmd += ["--resume", self.session_id]
-
-        # One retry after re-locating, for the narrow race where the path was
-        # valid at the isfile() check above but vanished before launch (the
-        # desktop app cleaning up an old version folder mid-question).
-        proc = None
-        for attempt in range(2):
             try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                break
-            except FileNotFoundError:
-                if attempt == 0 and self._locate_claude_exe():
-                    cmd[0] = self.claude_exe
-                    continue
-                self.ui_queue.put((
-                    "answer",
-                    (
-                        "Claude: [can't find the Claude desktop app] It may be "
-                        "in the middle of updating -- wait a minute and try "
-                        "again.",
-                        "error",
-                    ),
-                ))
-                self.ui_queue.put(("done", None))
-                return
+                content.append(_image_input_from_file(screenshot_path))
             except Exception as exc:
-                self.ui_queue.put(("answer", (f"Claude: [failed to run claude.exe: {exc}]", "error")))
+                self.ui_queue.put(("answer", (f"Grok: [couldn't read screenshot: {exc}]", "error")))
                 self.ui_queue.put(("done", None))
                 return
 
-        self._current_proc = proc
-        if self._stopped_by_user:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+        def build_body(previous_id):
+            user_msg = {"role": "user", "content": content}
+            if previous_id:
+                messages = [user_msg]
+            else:
+                # The system prompt is only sent on the turn that starts a
+                # conversation; it's then part of the stored history that
+                # previous_response_id chains onto.
+                messages = [{"role": "system", "content": build_system_prompt()}, user_msg]
+            body = {
+                "model": self.settings["model"],
+                "input": messages,
+                "tools": [{"type": "web_search"}],
+                "reasoning": {"effort": self.settings["effort"]},
+                "stream": True,
+                "store": True,
+            }
+            if previous_id:
+                body["previous_response_id"] = previous_id
+            return body
 
+        self.ui_queue.put(("status", "Thinking..."))
         answer_started = False
-        final_event = None
-        read_error = None
+        answer_parts = []
+        final_response = None
+        error_msg = None
+        previous_id = self.session_id
 
-        try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
+        for attempt in range(2):
+            req = urllib.request.Request(
+                XAI_RESPONSES_URL,
+                data=json.dumps(build_body(previous_id)).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "User-Agent": f"GrokWowOverlay/{APP_VERSION}",
+                },
+                method="POST",
+            )
+            try:
+                resp = urllib.request.urlopen(req, timeout=XAI_REQUEST_TIMEOUT)
+            except urllib.error.HTTPError as exc:
+                detail = _http_error_detail(exc)
+                # A stored response can expire or be deleted -- start a fresh
+                # conversation once instead of failing every question forever.
+                if attempt == 0 and previous_id and exc.code in (400, 404):
+                    previous_id = None
+                    self.session_id = None
                     continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+                error_msg = f"HTTP {exc.code}: {detail}"
+                break
+            except Exception as exc:
+                error_msg = str(exc)
+                break
 
-                etype = event.get("type")
-                if etype == "system" and event.get("subtype") == "status":
-                    if event.get("status") == "requesting":
+            self._current_proc = _StreamHandle(resp)
+            if self._stopped_by_user:
+                self._current_proc.terminate()
+            try:
+                for event in _iter_sse_events(resp):
+                    etype = event.get("type", "")
+                    if etype in ("response.created", "response.in_progress"):
                         self.ui_queue.put(("status", "Thinking..."))
-
-                elif etype == "stream_event":
-                    inner = event.get("event", {})
-                    itype = inner.get("type")
-
-                    if itype == "content_block_start":
-                        block = inner.get("content_block", {})
-                        btype = block.get("type")
-                        if btype == "thinking":
+                    elif etype.startswith("response.reasoning"):
+                        if not answer_started:
                             self.ui_queue.put(("status", "Thinking..."))
-                        elif btype == "tool_use":
-                            name = block.get("name", "a tool")
-                            label = TOOL_STATUS_LABELS.get(name, f"Using {name}...")
-                            self.ui_queue.put(("status", label))
-                        elif btype == "text" and not answer_started:
-                            answer_started = True
-                            self.ui_queue.put(("answer_begin", None))
-
-                    elif itype == "content_block_delta":
-                        delta = inner.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                if not answer_started:
-                                    answer_started = True
-                                    self.ui_queue.put(("answer_begin", None))
-                                self.ui_queue.put(("answer_chunk", text))
-
-                elif etype == "result":
-                    final_event = event
-
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            read_error = "claude.exe kept running after the response finished"
-        except Exception as exc:
-            read_error = str(exc)
-
-        stderr_text = ""
-        try:
-            if proc.stderr:
-                stderr_text = proc.stderr.read().strip()
-        except Exception:
-            pass
+                    elif etype.startswith("response.web_search_call"):
+                        self.ui_queue.put(("status", TOOL_STATUS_LABELS["web_search"]))
+                    elif etype == "response.output_item.added":
+                        item = event.get("item", {}) or {}
+                        itype = item.get("type", "")
+                        if itype.endswith("_call"):
+                            name = itype[: -len("_call")]
+                            self.ui_queue.put(("status", TOOL_STATUS_LABELS.get(name, f"Using {name}...")))
+                    elif etype == "response.output_text.delta":
+                        text = event.get("delta", "")
+                        if text:
+                            if not answer_started:
+                                answer_started = True
+                                self.ui_queue.put(("answer_begin", None))
+                            answer_parts.append(text)
+                            self.ui_queue.put(("answer_chunk", text))
+                    elif etype in ("response.completed", "response.incomplete"):
+                        final_response = event.get("response") or {}
+                    elif etype in ("response.failed", "error"):
+                        err = (event.get("response") or {}).get("error") or event.get("error") or event
+                        error_msg = err.get("message") if isinstance(err, dict) else str(err)
+            except Exception as exc:
+                if not self._stopped_by_user:
+                    error_msg = error_msg or str(exc)
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+            break
 
         self._current_proc = None
 
         if self._stopped_by_user:
-            # A deliberate cancel, not a failure -- no alarming [error] text.
             if answer_started:
                 self.ui_queue.put(("answer_chunk", "\n\n[stopped]"))
             else:
-                self.ui_queue.put(("answer", ("Claude: [stopped]", None)))
+                self.ui_queue.put(("answer", ("Grok: [stopped]", None)))
             self.ui_queue.put(("done", None))
             return
 
-        if final_event is None or final_event.get("is_error"):
-            msg = (
-                read_error
-                or (final_event and final_event.get("result"))
-                or stderr_text
-                or "no response from claude.exe"
-            )
+        if final_response and final_response.get("id"):
+            self.session_id = final_response["id"]
+            # Persisted immediately so a crash still resumes next launch.
+            self.settings["session_id"] = self.session_id
+            save_settings(self.settings)
+
+        result_text = "".join(answer_parts)
+        if not result_text and final_response:
+            result_text = _response_output_text(final_response)
+
+        if error_msg or final_response is None:
+            msg = error_msg or "no response from xAI"
             msg_lower = msg.lower()
-            if "not logged in" in msg_lower or "invalid bearer" in msg_lower:
+            if any(p in msg_lower for p in ("401", "403", "api key", "unauthorized", "incorrect")):
+                msg += "\n\n" + MISSING_KEY_MESSAGE
+            elif any(p in msg_lower for p in ("rate limit", "429", "quota", "credits", "spending limit")):
                 msg += (
-                    "\n\nRun `claude setup-token` in a terminal and update "
-                    "CLAUDE_CODE_OAUTH_TOKEN with the new token."
-                )
-            elif any(p in msg_lower for p in (
-                "rate limit", "rate_limit", "429", "overloaded", "usage limit",
-                "quota",
-            )):
-                msg += (
-                    "\n\nClaude is rate-limiting or over quota right now -- "
-                    "wait a bit and try again."
+                    "\n\nxAI is rate-limiting this key or it's out of credits -- "
+                    "wait a bit, or check billing at console.x.ai."
                 )
             elif any(p in msg_lower for p in (
                 "network", "connection", "timed out", "timeout",
-                "temporary failure", "getaddrinfo", "econnrefused", "enotfound",
+                "temporary failure", "getaddrinfo", "urlopen error",
             )):
                 msg += "\n\nThis looks like a network problem -- check your connection and try again."
             if answer_started:
                 self.ui_queue.put(("answer_chunk", f"\n\n[error] {msg}"))
             else:
-                self.ui_queue.put(("answer", (f"Claude: [error] {msg}", "error")))
+                self.ui_queue.put(("answer", (f"Grok: [error] {msg}", "error")))
+            self.ui_queue.put(("done", None))
+            return
         elif not answer_started:
-            # Nothing streamed as text (e.g. a turn that ended in pure tool
-            # calls) -- fall back to the final result so there's always an answer.
-            text = final_event.get("result") or "(empty response)"
-            self.ui_queue.put(("answer", (f"Claude: {text}", None)))
+            self.ui_queue.put(("answer", (f"Grok: {result_text or '(empty response)'}", None)))
 
-        if final_event and not final_event.get("is_error"):
-            result_text = final_event.get("result") or ""
+        match = LOCATION_TAG_RE.search(result_text)
+        if match:
+            self.ui_queue.put(("location_found", {
+                "raw_tag": match.group(0),
+                "zone": match.group(1),
+                "x": match.group(2),
+                "y": match.group(3),
+            }))
 
-            match = LOCATION_TAG_RE.search(result_text)
-            if match:
-                self.ui_queue.put(("location_found", {
-                    "raw_tag": match.group(0),
-                    "zone": match.group(1),
-                    "x": match.group(2),
-                    "y": match.group(3),
+        savenote_matches = list(SAVENOTE_RE.finditer(result_text))
+        if savenote_matches:
+            char_name, realm, level = get_current_character_identity()
+            saved_labels = []
+            raw_tags = []
+            for m in savenote_matches:
+                category, value = m.group(1), m.group(2)
+                if char_name and category in NOTE_CATEGORIES:
+                    save_character_note(char_name, realm, category, value, level)
+                    saved_labels.append(NOTE_CATEGORIES[category])
+                    raw_tags.append(m.group(0))
+            if saved_labels:
+                self.ui_queue.put(("notes_saved", {
+                    "labels": saved_labels, "raw_tags": raw_tags,
                 }))
-
-            savenote_matches = list(SAVENOTE_RE.finditer(result_text))
-            if savenote_matches:
-                char_name, realm, level = get_current_character_identity()
-                saved_labels = []
-                raw_tags = []
-                for m in savenote_matches:
-                    category, value = m.group(1), m.group(2)
-                    if char_name and category in NOTE_CATEGORIES:
-                        save_character_note(char_name, realm, category, value, level)
-                        saved_labels.append(NOTE_CATEGORIES[category])
-                        raw_tags.append(m.group(0))
-                if saved_labels:
-                    self.ui_queue.put(("notes_saved", {
-                        "labels": saved_labels, "raw_tags": raw_tags,
-                    }))
 
         self.ui_queue.put(("done", None))
 
@@ -2720,7 +2719,7 @@ if __name__ == "__main__":
     if not acquire_single_instance():
         sys.exit(0)
     try:
-        app = ClaudeOverlay()
+        app = GrokOverlay()
         app.run()
     except Exception:
         # Catches failures before report_callback_exception is even wired up
@@ -2731,9 +2730,9 @@ if __name__ == "__main__":
         try:
             ctypes.windll.user32.MessageBoxW(
                 0,
-                "Claude WoW Overlay hit an unexpected error and had to close.\n\n"
+                "Grok WoW Overlay hit an unexpected error and had to close.\n\n"
                 f"Details were saved to:\n{CRASH_LOG_PATH}",
-                "Claude WoW Overlay -- crashed",
+                "Grok WoW Overlay -- crashed",
                 0x10,  # MB_ICONERROR
             )
         except Exception:

@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.3.0
+- **Now powered by xAI Grok instead of Anthropic Claude.** The overlay
+  talks directly to xAI's API (`https://api.x.ai/v1/responses`) on
+  `grok-4.7`, with Grok's built-in web search. Same features as before:
+  streamed answers with live status, screenshot questions, map-location
+  button, per-character notes, Low/Medium/High effort, and conversations
+  that survive a restart.
+- **No more Claude desktop app or Claude subscription needed.** Instead you
+  need your own xAI API key from https://console.x.ai (API Keys page; the
+  account needs credits). The setup wizard asks for it, checks it, and saves
+  it as the `XAI_API_KEY` environment variable on your PC. xAI doesn't offer
+  a "sign in with Grok/X" option for third-party apps, so a key is the
+  supported way in.
+- Updating from v1.2.x: the setup wizard will ask for your xAI key once,
+  and your conversation starts fresh (old Claude conversations can't be
+  carried over). Saved per-character notes and your WoW addon data are kept.
+- In-game commands are now `/groksync` and `/grokmark`; the old
+  `/claudesync` and `/claudemark` still work.
+- Internal file/folder names (`ClaudeWowOverlay`, the `ClaudeContext`
+  addon) are unchanged so existing installs and saved data keep working.
+
 ## v1.2.8
 - Only one copy of the app can run at a time. Launching it again while it's
   already running now brings the existing window forward instead of starting

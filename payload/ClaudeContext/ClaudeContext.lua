@@ -1,12 +1,12 @@
 --[[
-    Claude Context
+    Grok Context
     --------------
     Dumps character, location and quest log to ClaudeContextDB (a JSON string)
     on login, logout and quest/zone changes. A companion desktop app reads this
     SavedVariables file directly off disk -- this addon never touches the
     network itself, it only writes the same kind of file any other addon does.
 
-    SavedVariables only actually hit disk on logout or /reload, so /claudesync
+    SavedVariables only actually hit disk on logout or /reload, so /groksync
     (which forces a reload) is the fast way to refresh it mid-session.
 
     Written against C_QuestLog / C_Map, the only quest-log/map API WoW Forever
@@ -97,7 +97,7 @@ end
 -- content, itemization and talents genuinely differ between them, and the
 -- overlay app picks up whichever flavor's SavedVariables file was written
 -- most recently (see overlay.py's find_wow_context_file()). Without this,
--- Claude could confidently answer a Retail question off stale Classic data
+-- Grok could confidently answer a Retail question off stale Classic data
 -- with no way to notice the mismatch.
 --
 -- WoW Forever's own interface/toc version (16000-19999) is checked FIRST and
@@ -381,7 +381,7 @@ local function Sync()
     else
         -- TEMPORARY: surface the real reason instead of failing quietly,
         -- while we're actively debugging why nothing gets saved.
-        print("|cffff6b6bClaude Context sync failed:|r " .. tostring(encoded))
+        print("|cffff6b6bGrok Context sync failed:|r " .. tostring(encoded))
     end
 end
 
@@ -393,7 +393,7 @@ end
 -- can report equipped gear (and presumably bag contents) as completely
 -- empty even though the player clearly has items equipped -- WoW's
 -- inventory/equipment cache isn't always populated the instant
--- PLAYER_LOGIN/PLAYER_ENTERING_WORLD fires. A /claudesync run later in the
+-- PLAYER_LOGIN/PLAYER_ENTERING_WORLD fires. A /groksync run later in the
 -- same session (well after everything's settled) found the same gear just
 -- fine, which pins this down as a startup race, not a wrong API. A couple
 -- seconds' delay before the FIRST post-load sync avoids it; QUEST_LOG_UPDATE
@@ -420,7 +420,8 @@ f:SetScript("OnEvent", function(self, event, ...)
     end
 end)
 
-SLASH_CLAUDECONTEXT1 = "/claudesync"
+SLASH_CLAUDECONTEXT1 = "/groksync"
+SLASH_CLAUDECONTEXT2 = "/claudesync" -- legacy alias from the Claude-based versions
 SlashCmdList["CLAUDECONTEXT"] = function()
     Sync()
     -- Deliberately NOT calling ReloadUI() here. It's a protected call, and
@@ -429,12 +430,12 @@ SlashCmdList["CLAUDECONTEXT"] = function()
     -- SavedVariables never got flushed to disk). Rather than fight taint
     -- rules from inside addon code, just tell the player to do it themselves
     -- -- typing /reload directly is never subject to this at all.
-    print("|cff7c5cffClaude Context:|r saved to memory. Type |cffffffff/reload|r "
+    print("|cff7c5cffGrok Context:|r saved to memory. Type |cffffffff/reload|r "
         .. "yourself now to write it to disk.")
 end
 
 -- ============================================================================
--- /claudemark [zone name] x y -- places a native waypoint pin (the same one
+-- /grokmark [zone name] x y -- places a native waypoint pin (the same one
 -- shift-click on the map gives you) from a location the overlay app found.
 -- Confirmed working on this client: C_Map.SetUserWaypoint exists here even
 -- though it's a Legion-era retail API, unlike C_QuestLog's legacy globals.
@@ -484,7 +485,8 @@ local function FindMapIdByName(name)
     return searchChildren(rootId, 0)
 end
 
-SLASH_CLAUDEMARK1 = "/claudemark"
+SLASH_CLAUDEMARK1 = "/grokmark"
+SLASH_CLAUDEMARK2 = "/claudemark" -- legacy alias from the Claude-based versions
 SlashCmdList["CLAUDEMARK"] = function(msg)
     local parts = {}
     for word in tostring(msg or ""):gmatch("%S+") do
@@ -492,14 +494,14 @@ SlashCmdList["CLAUDEMARK"] = function(msg)
     end
 
     if #parts < 2 then
-        print("|cffff6b6bClaude Context:|r usage: /claudemark [zone name] x y")
+        print("|cffff6b6bGrok Context:|r usage: /grokmark [zone name] x y")
         return
     end
 
     local y = tonumber(parts[#parts])
     local x = tonumber(parts[#parts - 1])
     if not x or not y then
-        print("|cffff6b6bClaude Context:|r couldn't parse coordinates from: " .. msg)
+        print("|cffff6b6bGrok Context:|r couldn't parse coordinates from: " .. msg)
         return
     end
 
@@ -513,7 +515,7 @@ SlashCmdList["CLAUDEMARK"] = function(msg)
 
     if not mapId or not C_Map.SetUserWaypoint or not UiMapPoint
         or not UiMapPoint.CreateFromCoordinates then
-        print("|cffff6b6bClaude Context:|r couldn't set a waypoint on this client.")
+        print("|cffff6b6bGrok Context:|r couldn't set a waypoint on this client.")
         return
     end
 
@@ -525,12 +527,12 @@ SlashCmdList["CLAUDEMARK"] = function(msg)
 
     if usedFallback and zoneName ~= "" then
         print(string.format(
-            "|cffff6b6bClaude Context:|r couldn't find zone \"%s\" nearby -- "
+            "|cffff6b6bGrok Context:|r couldn't find zone \"%s\" nearby -- "
             .. "marked (%.1f, %.1f) in your current zone instead.",
             zoneName, x, y))
     else
         print(string.format(
-            "|cff7c5cffClaude Context:|r waypoint set: %s (%.1f, %.1f)",
+            "|cff7c5cffGrok Context:|r waypoint set: %s (%.1f, %.1f)",
             zoneName ~= "" and zoneName or "your current zone", x, y))
     end
 end

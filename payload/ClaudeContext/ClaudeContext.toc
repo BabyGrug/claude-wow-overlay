@@ -1,6 +1,6 @@
 ## Interface: 16000, 16001, 11507, 11508, 11509, 11510, 40400, 40401, 40402, 40403, 50500, 50501, 50502, 120100, 120101, 120102, 120103, 120104, 120105
-## Title: Claude Context
-## Notes: Writes your character, location and quest log to disk so the Claude overlay app can use it as context. No network access, no automation -- just a SavedVariables dump.
+## Title: Grok Context
+## Notes: Writes your character, location and quest log to disk so the Grok overlay app can use it as context. No network access, no automation -- just a SavedVariables dump.
 ## Author: You
 ## Version: 1.2.0
 ## SavedVariablesPerCharacter: ClaudeContextDB
