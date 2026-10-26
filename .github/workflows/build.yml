@@ -2,7 +2,10 @@ name: Build installer
 
 on:
   workflow_dispatch:
+  # workflow_dispatch only works once this file is on the default branch,
+  # so until the PR merges, pushes to grok-port also build.
   push:
+    branches: [grok-port]
     tags: ["v*"]
 
 permissions:
