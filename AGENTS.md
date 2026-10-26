@@ -69,21 +69,53 @@ question off stale Classic data with no way to notice the mismatch.
 
 ## The core loop
 
-Every question is a direct HTTPS call to **xAI's Responses API**
-(`POST https://api.x.ai/v1/responses`, OpenAI-compatible) from
-`_run_grok()`, using only the standard library (`urllib`) -- no SDK, no
-CLI, no extra dependency to bundle. Auth is the user's own **xAI API key**
-in the `XAI_API_KEY` user environment variable (the installer saves it with
+**Default backend: the official Grok Build CLI** (`grok.exe`, xAI's terminal
+agent -- https://docs.x.ai/build/overview, docs in
+https://github.com/xai-org/grok-build under
+`crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md`). Same
+pattern as the Claude era's `claude.exe -p --output-format stream-json`: the
+user signs in once with `grok login` (browser OAuth with their SuperGrok /
+X Premium+ subscription, handled entirely by the CLI), and
+`_run_grok_cli()` runs it headlessly per question:
+
+    grok --prompt-file <ClaudeWowOverlay\grok_prompt.json>
+         --output-format streaming-messages-json --include-partial-messages
+         --effort <low|medium|high> --rules <system prompt>
+         --tools web_search,web_fetch --no-subagents --no-plan
+         --max-turns 12 --no-auto-update --cwd <ClaudeWowOverlay dir>
+         (-s <new uuid> | --resume <uuid>)
+
+- `streaming-messages-json` is the Messages-API `stream-json` shape, so the
+  parser is the old claude.exe one: `stream_event` `content_block_start`
+  (thinking / tool_use / `server_tool_use` -> status line) and
+  `content_block_delta` `text_delta` -> streamed text; terminal `result`
+  (`is_error`, `result`, and `errors[]` on failure).
+- The prompt always goes via `--prompt-file` as ACP content blocks
+  (`[{"type":"text",...},{"type":"image","data":<b64>,"mimeType":"image/png"}]`)
+  -- keeps a base64 screenshot clear of Windows' ~32K command-line limit.
+- `XAI_API_KEY` is **stripped from the child env** so the CLI always bills
+  the subscription sign-in, never a stray API key.
+- The installer and `grok_cli_signed_in()` detect sign-in via `grok models`
+  ("You are not authenticated." when signed out). Never read `~/.grok/auth.json`.
+- Found at `%USERPROFILE%\.grok\bin\grok.exe` (install.ps1's default),
+  `GROK_BIN_DIR`, or PATH (`find_grok_exe()`).
+- `settings["backend"]`: `auto` (CLI if installed, else API key), `cli`,
+  `api`. `session_backend` (`cli`/`xai`) records which kind of id
+  `session_id` is; switching backend starts a fresh conversation.
+
+**Optional fallback: xAI Responses API with `XAI_API_KEY`** (pay per use)
+via `_run_grok()` -- direct HTTPS (`POST https://api.x.ai/v1/responses`),
+stdlib `urllib`, nothing to bundle. The installer can save the key with
 `setx`; `get_xai_api_key()` also reads `HKCU\Environment` directly because
-`setx` doesn't update already-running processes). Nothing routes through
-anyone else -- that privacy property is unchanged from the Claude days.
+`setx` doesn't update already-running processes.
 
-xAI does **not** offer a supported "sign in with Grok/X" OAuth flow for
-third-party apps: docs.x.ai only documents API keys from console.x.ai, and
-there's no developer console to register an OAuth client. (Some OSS tools
-reuse the Grok CLI's own OAuth client id against auth.x.ai -- unsanctioned,
-can be revoked, and xAI 403s some subscribers on it. Don't build that.)
+Don't build our own "sign in with Grok" OAuth: xAI has no public
+third-party OAuth client registration. Tools that do it (e.g. Hermes
+Agent's `xai-oauth`) reuse xAI's own client against accounts.x.ai/auth.x.ai,
+and xAI has 403'd some subscribers on that path. Driving the official CLI
+is the supported way to use a subscription.
 
+API-fallback details --
 Request shape: `model` = `XAI_DEFAULT_MODEL` (`grok-4.7`, fixed, not
 user-selectable), `reasoning.effort` = the Settings effort
 (Low/Medium/High), `tools: [{"type": "web_search"}]` (server-side search,
@@ -430,9 +462,11 @@ notes, code comments, etc.
 ## Known limitations / open items
 
 - **Grok port (v1.3.0)**: built and syntax/unit-tested off-Windows
-  against a mocked xAI SSE stream; still needs a real end-to-end run on
-  Windows with a real key (installer key page, streaming, web search,
-  screenshot, Stop, resume after restart, in-game `/grokmark`).
+  against a fake `grok` emitting the documented streaming-messages-json and
+  a mocked xAI SSE stream; the real grok 1.0.70 binary accepted the exact
+  flag set (stopped at "Not signed in"). Still needs a real signed-in run on
+  Windows (installer Grok Build page, streaming, web search, screenshot as
+  an image block, Stop, resume after restart, in-game `/grokmark`).
 
 ## Legacy names
 

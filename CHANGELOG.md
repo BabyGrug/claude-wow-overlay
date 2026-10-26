@@ -1,19 +1,19 @@
 # Changelog
 
 ## v1.3.0
-- **Now powered by xAI Grok instead of Anthropic Claude.** The overlay
-  talks directly to xAI's API (`https://api.x.ai/v1/responses`) on
-  `grok-4.7`, with Grok's built-in web search. Same features as before:
-  streamed answers with live status, screenshot questions, map-location
-  button, per-character notes, Low/Medium/High effort, and conversations
-  that survive a restart.
-- **No more Claude desktop app or Claude subscription needed.** Instead you
-  need your own xAI API key from https://console.x.ai (API Keys page; the
-  account needs credits). The setup wizard asks for it, checks it, and saves
-  it as the `XAI_API_KEY` environment variable on your PC. xAI doesn't offer
-  a "sign in with Grok/X" option for third-party apps, so a key is the
-  supported way in.
-- Updating from v1.2.x: the setup wizard will ask for your xAI key once,
+- **Now powered by xAI Grok instead of Anthropic Claude.** By default the
+  overlay runs xAI's official **Grok Build** app (`grok`) on your PC, signed
+  in with your **SuperGrok or X Premium+ subscription** -- the same pattern
+  the Claude version used with the Claude app, so there's no separate API
+  bill. Same features as before: streamed answers with live status, web
+  search, screenshot questions, map-location button, per-character notes,
+  Low/Medium/High effort, and conversations that survive a restart.
+- The setup wizard checks Grok Build is installed and signed in, and if not
+  opens PowerShell to run xAI's official installer and `grok login`.
+- Optional fallback: an xAI API key (`XAI_API_KEY`, pay-as-you-go, billed
+  separately) is used only when Grok Build isn't installed, or when
+  `"backend": "api"` is set in settings.json.
+- Updating from v1.2.x: the wizard will ask you to set up Grok Build once,
   and your conversation starts fresh (old Claude conversations can't be
   carried over). Saved per-character notes and your WoW addon data are kept.
 - In-game commands are now `/groksync` and `/grokmark`; the old

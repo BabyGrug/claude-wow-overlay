@@ -14,22 +14,24 @@ Run it and follow the setup wizard — a couple of minutes, mostly automatic.
 
 ### Requirements
 
-- **Your own xAI API key.** The overlay talks straight from your PC to xAI's
-  API with your key -- nothing you ask passes through anyone else. To get
-  one:
-  1. Go to [console.x.ai](https://console.x.ai) and sign in or create an
-     account.
-  2. Add some credits under Billing (usage is pay-as-you-go, billed to your
-     xAI account).
-  3. Open **API Keys**, create a key, and copy it (it starts with `xai-`).
-  4. Paste it into the setup wizard when it asks -- it checks the key and
-     saves it on your PC as the `XAI_API_KEY` environment variable. (To do
-     it by hand instead: `setx XAI_API_KEY "xai-..."` in a terminal, then
-     restart the overlay.)
+- **A SuperGrok or X Premium+ subscription** and xAI's official **Grok
+  Build** app (the `grok` command). The overlay runs it on your PC, signed
+  in with your subscription -- the same way the old Claude version ran the
+  Claude app -- so there's no separate API bill and nothing you ask passes
+  through anyone else. The setup wizard does this for you; by hand it's:
+  1. In PowerShell: `irm https://x.ai/cli/install.ps1 | iex`
+     ([xAI's install instructions](https://docs.x.ai/build/overview))
+  2. Then `grok login` and sign in in your browser with the account that has
+     the subscription.
 
-  xAI doesn't currently offer a "sign in with Grok / X" login for
-  third-party apps, so an API key is the supported way in. Never share your
-  key or commit it anywhere.
+  Grok Build is in beta; xAI may limit how much you can use it per your plan.
+- **Optional alternative: an xAI API key** (pay-as-you-go, billed separately
+  by xAI). Only used if Grok Build isn't installed. Create one at
+  [console.x.ai](https://console.x.ai) (API Keys; needs credits), then choose
+  "Use an API key instead" in the setup wizard or run
+  `setx XAI_API_KEY "xai-..."` and restart the overlay. To force one backend,
+  set `"backend"` to `"cli"` or `"api"` in
+  `%LOCALAPPDATA%\ClaudeWowOverlay\settings.json` (default `"auto"`).
 - World of Warcraft (any of Forever, Retail, Classic, or Classic Era). The
   companion addon (character/location/quest awareness) is optional but
   recommended -- the installer offers to set it up automatically in whichever
@@ -63,8 +65,8 @@ want to check it yourself.
   playing, falling back to general Classic/Vanilla knowledge on WoW Forever
   specifically if nothing Forever-specific turns up — and always tells you
   when it's doing that
-- Uses `grok-4.7` with xAI's built-in web search; effort (Low/Medium/High)
-  is adjustable in Settings
+- Uses Grok with web search; effort (Low/Medium/High) is adjustable in
+  Settings
 - Checks for updates on startup and shows a button when a new version is out
 
 ## Updating
@@ -75,8 +77,9 @@ runs the latest installer for you.
 
 ## For developers
 
-`overlay.py` is the app (Tkinter + streaming calls to
-`https://api.x.ai/v1/responses`), `installer.py` the setup wizard, and
+`overlay.py` is the app (Tkinter + the local `grok` CLI in headless
+`streaming-messages-json` mode, or `https://api.x.ai/v1/responses` with an
+API key), `installer.py` the setup wizard, and
 `payload/ClaudeContext/` the WoW addon. See `AGENTS.md` for architecture
 notes. Some internal names still say "Claude" (repo, exe, addon folder) on
 purpose, so existing installs keep working.

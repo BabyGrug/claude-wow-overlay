@@ -41,7 +41,9 @@ import socket
 import subprocess
 import sys
 import threading
+import shutil
 import time
+import uuid
 import tkinter as tk
 import traceback
 import urllib.error
@@ -275,7 +277,13 @@ DEFAULT_SETTINGS = {
     # just something nobody had persisted yet. "New" is still the explicit
     # way to reset both this and the visible transcript below.
     "session_id": None,
-    "session_backend": "xai",
+    # Which backend owns session_id: "cli" (a Grok Build session UUID) or
+    # "xai" (a Responses API response id). They aren't interchangeable.
+    "session_backend": "cli",
+    # "auto" -> the official Grok Build CLI (grok.exe, signed in with your
+    # SuperGrok / X Premium+ subscription) when it's installed, otherwise
+    # the XAI_API_KEY fallback. "cli" / "api" force one or the other.
+    "backend": "auto",
 }
 
 TRANSCRIPT_PATH = os.path.join(
@@ -316,9 +324,11 @@ def load_settings() -> dict:
     # A session_id saved by the old Claude-based versions is a claude.exe
     # session UUID, meaningless to xAI -- drop it once so the first question
     # after upgrading starts a fresh Grok conversation.
-    if settings.get("session_backend") != "xai":
+    if settings.get("session_backend") not in ("cli", "xai"):
         settings["session_id"] = None
-        settings["session_backend"] = "xai"
+        settings["session_backend"] = "cli"
+    if settings.get("backend") not in ("auto", "cli", "api"):
+        settings["backend"] = "auto"
     return settings
 
 
@@ -501,6 +511,8 @@ def cleanup_old_screenshots(max_age_hours=SCREENSHOT_MAX_AGE_HOURS):
 # Friendlier status-line text for tool_use blocks the model streams back.
 # Anything not listed here falls back to f"Using {name}..." in _run_grok.
 TOOL_STATUS_LABELS = {
+    "WebSearch": "Searching the web...",
+    "web_fetch": "Reading a web page...",
     "web_search": "Searching the web...",
     "x_search": "Searching X...",
 }
@@ -994,7 +1006,91 @@ def _internet_available(timeout: float = 3.0) -> bool:
 
 
 # ============================================================================
-# xAI Grok API (Responses API -- https://docs.x.ai)
+# Grok Build CLI (default backend) -- https://docs.x.ai/build/overview
+# ============================================================================
+# xAI's official terminal agent. Installed with
+#     irm https://x.ai/cli/install.ps1 | iex
+# into %USERPROFILE%\.grok\bin\grok.exe and signed in once with `grok login`
+# (browser OAuth with the user's SuperGrok / X Premium+ account). We only
+# ever *run* it -- its credentials stay in its own ~/.grok and are never read
+# here. Headless use mirrors what claude.exe -p did: `-p`/`--prompt-file`,
+# `--output-format streaming-messages-json --include-partial-messages`
+# (Messages-API-shaped stream-json), `-s <uuid>` to start a session and
+# `--resume <uuid>` to continue it.
+
+GROK_CLI_TIMEOUT = 20  # seconds, for quick probe commands only
+
+NOT_SIGNED_IN_MESSAGE = (
+    "Grok Build isn't signed in. Open a terminal and run:\n"
+    "    grok login\n"
+    "then sign in with the account that has your SuperGrok or X Premium+ "
+    "subscription, and ask again."
+)
+
+MISSING_CLI_MESSAGE = (
+    "Grok Build (xAI's official grok command) isn't installed. In PowerShell "
+    "run:\n"
+    "    irm https://x.ai/cli/install.ps1 | iex\n"
+    "then `grok login`, and restart the overlay. (Or, to pay per use "
+    "instead, set an xAI API key -- see the README.)"
+)
+
+
+def find_grok_exe():
+    """Path to the official grok CLI, or None. Checks the installer's
+    default location first because PATH changes from the install script
+    don't reach processes (like this one) that were already running."""
+    candidates = []
+    if os.environ.get("GROK_BIN_DIR"):
+        candidates.append(os.path.join(os.environ["GROK_BIN_DIR"], "grok.exe"))
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    candidates.append(os.path.join(home, ".grok", "bin", "grok.exe"))
+    candidates.append(os.path.join(home, ".grok", "bin", "grok"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return shutil.which("grok")
+
+
+def grok_cli_env():
+    """Environment for grok.exe: the user's own, minus XAI_API_KEY, so the
+    CLI always uses the subscription sign-in and never silently bills a
+    separately-set API key."""
+    env = dict(os.environ)
+    env.pop("XAI_API_KEY", None)
+    return env
+
+
+def grok_cli_signed_in(exe):
+    """True/False if we can tell, None if the probe itself failed. Uses the
+    CLI's own `grok models`, which says "You are not authenticated." when
+    there's no sign-in (verified against grok 1.0.70)."""
+    try:
+        out = subprocess.run(
+            [exe, "models"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=GROK_CLI_TIMEOUT,
+            env=grok_cli_env(), stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return None
+    text = (out.stdout or "") + (out.stderr or "")
+    if "not authenticated" in text.lower() or "not signed in" in text.lower():
+        return False
+    return out.returncode == 0
+
+
+def _cli_error_text(final_event):
+    if not final_event:
+        return ""
+    errs = final_event.get("errors")
+    if isinstance(errs, list) and errs:
+        return "\n".join(str(e) for e in errs)
+    return str(final_event.get("result") or "")
+
+
+# ============================================================================
+# xAI Grok API (Responses API -- https://docs.x.ai) -- optional fallback
 # ============================================================================
 
 XAI_API_BASE = "https://api.x.ai/v1"
@@ -1557,7 +1653,7 @@ class GrokOverlay:
             font=("Segoe UI", 10, "bold"), anchor="w",
         ).pack(side="left")
         tk.Label(
-            model_row, text="Grok 4.7", bg=bg, fg="#9a9aa2",
+            model_row, text="Grok (Grok Build CLI or API key)", bg=bg, fg="#9a9aa2",
             font=("Segoe UI", 9), anchor="e",
         ).pack(side="right")
 
@@ -2489,10 +2585,234 @@ class GrokOverlay:
         self.status_var.set("Thinking...")
 
         thread = threading.Thread(
-            target=self._run_grok, args=(question,),
+            target=self._run_grok_dispatch, args=(question,),
             kwargs={"screenshot_path": screenshot_path}, daemon=True,
         )
         thread.start()
+
+    def _pick_backend(self):
+        """("cli", exe) or ("api", None) or (None, error message)."""
+        mode = self.settings.get("backend", "auto")
+        exe = find_grok_exe() if mode in ("auto", "cli") else None
+        if exe:
+            return "cli", exe
+        if mode == "cli":
+            return None, MISSING_CLI_MESSAGE
+        if get_xai_api_key():
+            return "api", None
+        return None, MISSING_CLI_MESSAGE if mode == "auto" else MISSING_KEY_MESSAGE
+
+    def _use_session_backend(self, name):
+        """A CLI session UUID and an API response id aren't interchangeable;
+        start fresh if the backend changed since the last question."""
+        if self.settings.get("session_backend") != name:
+            self.session_id = None
+            self.settings["session_id"] = None
+            self.settings["session_backend"] = name
+            save_settings(self.settings)
+
+    def _run_grok_dispatch(self, question: str, screenshot_path=None):
+        backend, info = self._pick_backend()
+        if backend is None:
+            self.ui_queue.put(("answer", (f"Grok: [setup problem] {info}", "error")))
+            self.ui_queue.put(("done", None))
+            return
+        if backend == "cli":
+            self._use_session_backend("cli")
+            return self._run_grok_cli(question, info, screenshot_path=screenshot_path)
+        self._use_session_backend("xai")
+        return self._run_grok(question, screenshot_path=screenshot_path)
+
+    def _run_grok_cli(self, question: str, exe: str, screenshot_path=None):
+        """Default backend: drives the local, subscription-signed-in Grok
+        Build CLI headlessly -- the same pattern the Claude version used with
+        claude.exe -p --output-format stream-json."""
+        self.ui_queue.put(("status", "Checking connection..."))
+        if not _internet_available():
+            self.ui_queue.put(("answer", (
+                "Grok: [offline] Can't reach xAI's servers -- check your "
+                "internet connection and try again.", "error")))
+            self.ui_queue.put(("done", None))
+            return
+        if self._stopped_by_user:
+            self.ui_queue.put(("done", None))
+            return
+
+        # Per-turn context in the prompt; --rules carries the stable system
+        # instructions (sent every call -- harmless if a resumed session
+        # already has them).
+        if screenshot_path:
+            question = (
+                "[A screenshot of the player's screen was just taken and is "
+                "attached to this message -- look at it before answering.]\n\n"
+                f"{question}"
+            )
+        full_prompt = f"{build_turn_context()}\n\n{question}"
+
+        # The prompt always goes through --prompt-file as ACP content blocks:
+        # avoids Windows' ~32K command-line limit (a base64 screenshot is far
+        # bigger) and lets the image ride along as a real image block.
+        blocks = [{"type": "text", "text": full_prompt}]
+        if screenshot_path:
+            try:
+                with open(screenshot_path, "rb") as f:
+                    data = base64.b64encode(f.read()).decode("ascii")
+                ext = os.path.splitext(screenshot_path)[1].lower()
+                mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+                blocks.append({"type": "image", "data": data, "mimeType": mime})
+            except Exception as exc:
+                self.ui_queue.put(("answer", (f"Grok: [couldn't read the screenshot: {exc}]", "error")))
+                self.ui_queue.put(("done", None))
+                return
+        work_dir = os.path.dirname(SETTINGS_PATH)
+        os.makedirs(work_dir, exist_ok=True)
+        prompt_path = os.path.join(work_dir, "grok_prompt.json")
+        with open(prompt_path, "w", encoding="utf-8") as f:
+            json.dump(blocks, f)
+
+        cmd = [
+            exe,
+            "--prompt-file", prompt_path,
+            "--output-format", "streaming-messages-json",
+            "--include-partial-messages",
+            "--effort", self.settings["effort"],
+            "--rules", build_system_prompt(),
+            # Web only: no file edits, shell, or subagents from a game overlay.
+            "--tools", "web_search,web_fetch",
+            "--no-subagents",
+            "--no-plan",
+            "--max-turns", "12",
+            "--no-auto-update",
+            "--cwd", work_dir,
+        ]
+        new_session = self.session_id is None
+        if new_session:
+            self.session_id = str(uuid.uuid4())
+            cmd += ["-s", self.session_id]
+            self.settings["session_id"] = self.session_id
+            save_settings(self.settings)
+        else:
+            cmd += ["--resume", self.session_id]
+
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                errors="replace", env=grok_cli_env(), cwd=work_dir,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except FileNotFoundError:
+            self.ui_queue.put(("answer", (f"Grok: [setup problem] {MISSING_CLI_MESSAGE}", "error")))
+            self.ui_queue.put(("done", None))
+            return
+        except Exception as exc:
+            self.ui_queue.put(("answer", (f"Grok: [failed to run grok: {exc}]", "error")))
+            self.ui_queue.put(("done", None))
+            return
+
+        self._current_proc = proc
+        if self._stopped_by_user:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+        answer_started = False
+        final_event = None
+        read_error = None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = event.get("type")
+                if etype == "system" and event.get("subtype") == "init":
+                    self.ui_queue.put(("status", "Thinking..."))
+                elif etype == "stream_event":
+                    inner = event.get("event", {})
+                    itype = inner.get("type")
+                    if itype == "content_block_start":
+                        block = inner.get("content_block", {})
+                        btype = block.get("type")
+                        if btype == "thinking":
+                            self.ui_queue.put(("status", "Thinking..."))
+                        elif btype in ("tool_use", "server_tool_use"):
+                            name = block.get("name", "a tool")
+                            self.ui_queue.put(("status", TOOL_STATUS_LABELS.get(name, f"Using {name}...")))
+                        elif btype == "text" and not answer_started:
+                            answer_started = True
+                            self.ui_queue.put(("answer_begin", None))
+                    elif itype == "content_block_delta":
+                        delta = inner.get("delta", {})
+                        if delta.get("type") == "text_delta" and delta.get("text"):
+                            if not answer_started:
+                                answer_started = True
+                                self.ui_queue.put(("answer_begin", None))
+                            self.ui_queue.put(("answer_chunk", delta["text"]))
+                elif etype == "result":
+                    final_event = event
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            read_error = "grok kept running after the response finished"
+        except Exception as exc:
+            read_error = str(exc)
+
+        stderr_text = ""
+        try:
+            if proc.stderr:
+                stderr_text = proc.stderr.read().strip()
+        except Exception:
+            pass
+        self._current_proc = None
+        try:
+            os.remove(prompt_path)
+        except OSError:
+            pass
+
+        if self._stopped_by_user:
+            if answer_started:
+                self.ui_queue.put(("answer_chunk", "\n\n[stopped]"))
+            else:
+                self.ui_queue.put(("answer", ("Grok: [stopped]", None)))
+            self.ui_queue.put(("done", None))
+            return
+
+        if final_event is None or final_event.get("is_error"):
+            msg = read_error or _cli_error_text(final_event) or stderr_text or "no response from grok"
+            low = msg.lower()
+            if new_session:
+                # Session never really started -- don't try to resume it.
+                self.session_id = None
+                self.settings["session_id"] = None
+                save_settings(self.settings)
+            elif "session" in low and ("not found" in low or "does not exist" in low or "no session" in low):
+                self.session_id = None
+                self.settings["session_id"] = None
+                save_settings(self.settings)
+                msg += "\n\n(The old conversation is gone -- ask again to start a new one.)"
+            if "not signed in" in low or "not authenticated" in low:
+                msg = NOT_SIGNED_IN_MESSAGE
+            elif "403" in low or "forbidden" in low or "subscription" in low:
+                msg += (
+                    "\n\nYour account may not include Grok Build access -- it "
+                    "needs SuperGrok or X Premium+."
+                )
+            elif "rate limit" in low or "429" in low or "usage limit" in low:
+                msg += "\n\nYou've hit Grok's usage limit -- wait a bit and try again."
+            self.ui_queue.put(("answer", (f"Grok: [error] {msg}", "error")))
+            self.ui_queue.put(("done", None))
+            return
+
+        if not answer_started:
+            text = final_event.get("result") or ""
+            self.ui_queue.put(("answer", (f"Grok: {text or '(empty response)'}", None)))
+        full_text = final_event.get("result") or ""
+        self._handle_final_answer_text(full_text)
+        self.ui_queue.put(("done", None))
 
     def _run_grok(self, question: str, screenshot_path=None):
         """Sends one question to xAI's Responses API (POST /v1/responses)
@@ -2682,6 +3002,11 @@ class GrokOverlay:
         elif not answer_started:
             self.ui_queue.put(("answer", (f"Grok: {result_text or '(empty response)'}", None)))
 
+        self._handle_final_answer_text(result_text)
+        self.ui_queue.put(("done", None))
+
+    def _handle_final_answer_text(self, result_text: str):
+        """MAPLOC button + SAVENOTE notes, shared by both backends."""
         match = LOCATION_TAG_RE.search(result_text)
         if match:
             self.ui_queue.put(("location_found", {
@@ -2707,7 +3032,6 @@ class GrokOverlay:
                     "labels": saved_labels, "raw_tags": raw_tags,
                 }))
 
-        self.ui_queue.put(("done", None))
 
     def run(self):
         self.root.mainloop()

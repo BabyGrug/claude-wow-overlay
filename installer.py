@@ -3,11 +3,14 @@ Grok WoW Overlay -- guided setup.
 
 A normal (non-frameless) Tkinter wizard, styled to match the overlay app's
 own dark/purple look. Walks a completely non-technical user through:
-  1. Checking for a working xAI API key (XAI_API_KEY) -- the overlay calls
-     xAI's API directly with the user's own key, which is also *why*
-     nothing the user asks ever passes through us.
-  2. If there isn't one, walking them through creating one at
-     console.x.ai and saving it (setx XAI_API_KEY).
+  1. Checking that xAI's official Grok Build CLI (grok.exe) is installed
+     and signed in with the user's SuperGrok / X Premium+ subscription --
+     the overlay runs it locally, like the Claude version ran claude.exe,
+     so nothing the user asks ever passes through us and there's no
+     separate API bill.
+  2. If not, offering to install it (xAI's own install.ps1) and run
+     `grok login` in a PowerShell window -- or, optionally, to use a
+     pay-per-use xAI API key instead (saved with setx XAI_API_KEY).
   3. Finding their WoW install(s) -- WoW Forever, Retail, Classic, Classic
      Era, whichever are present -- and letting them pick which to set the
      addon up in (or point at one manually).
@@ -129,6 +132,75 @@ _FLAVOR_FOLDER_LABELS = {
     "_classic_": "Classic",
 }
 _FLAVOR_PRIORITY = {"WoW Forever": 0, "Retail": 1, "Classic": 2, "Classic Era": 3}
+
+
+GROK_INSTALL_CMD = "irm https://x.ai/cli/install.ps1 | iex"
+
+
+def find_grok_exe():
+    """Same lookup as overlay.find_grok_exe (kept in sync by hand)."""
+    candidates = []
+    if os.environ.get("GROK_BIN_DIR"):
+        candidates.append(os.path.join(os.environ["GROK_BIN_DIR"], "grok.exe"))
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    candidates.append(os.path.join(home, ".grok", "bin", "grok.exe"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return shutil.which("grok")
+
+
+def grok_cli_status():
+    """(installed, signed_in). Runs the CLI's own `grok models`, which
+    prints "You are not authenticated." without a sign-in. Never reads the
+    CLI's credential files."""
+    exe = find_grok_exe()
+    if not exe:
+        return False, False
+    env = dict(os.environ)
+    env.pop("XAI_API_KEY", None)  # judge the subscription sign-in alone
+    try:
+        out = subprocess.run(
+            [exe, "models"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, env=env, stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return True, False
+    text = ((out.stdout or "") + (out.stderr or "")).lower()
+    if "not authenticated" in text or "not signed in" in text:
+        return True, False
+    return True, out.returncode == 0
+
+
+def open_grok_setup_terminal(installed):
+    """Opens a visible PowerShell window running xAI's official installer
+    (if needed) and then `grok login`, which opens the browser sign-in."""
+    grok = find_grok_exe() or "grok"
+    if installed:
+        script = f"& '{grok}' login"
+    else:
+        script = (
+            f"{GROK_INSTALL_CMD}; "
+            "& \"$env:USERPROFILE\\.grok\\bin\\grok.exe\" login"
+        )
+    script += "; Write-Host ''; Write-Host 'Done -- you can close this window and go back to the setup.'"
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit",
+         "-Command", script],
+        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+    )
+
+
+def grok_ready():
+    """True if the overlay has a working backend: the signed-in CLI
+    (default) or, as a fallback, a valid XAI_API_KEY."""
+    installed, signed_in = grok_cli_status()
+    if installed and signed_in:
+        return True
+    if get_saved_api_key():
+        return test_api_key()[0]
+    return False
 
 
 def find_wow_installs():
@@ -394,7 +466,7 @@ class InstallerApp:
         steps.pack(fill="x", padx=32, pady=(0, 16))
         for i, text in enumerate([
             "Check that everything needed is installed",
-            "Add your xAI API key (one-time, from console.x.ai)",
+            "Sign in to Grok Build with your SuperGrok / X Premium+ account",
             "Install the app and the WoW addon",
         ], start=1):
             row = tk.Frame(steps, bg=BG)
@@ -422,7 +494,7 @@ class InstallerApp:
         checks_frame = tk.Frame(self.content, bg=BG)
         checks_frame.pack(fill="x", padx=32, pady=8)
         for key, label in [
-            ("login", "xAI API key"),
+            ("login", "Grok Build signed in (or an xAI API key)"),
             ("wow", "World of Warcraft"),
         ]:
             row = tk.Frame(checks_frame, bg=BG)
@@ -448,7 +520,7 @@ class InstallerApp:
         self.root.after(0, lambda: self.check_rows[key].config(text=symbol, fg=color))
 
     def _run_checks(self):
-        logged_in, _ = test_api_key()
+        logged_in = grok_ready()
         self._set_check("login", logged_in)
 
         self.wow_installs = find_wow_installs()
@@ -458,17 +530,86 @@ class InstallerApp:
 
     def _checks_done(self, logged_in):
         if not logged_in:
-            self._page_login()
+            self._page_grok_cli()
         else:
             self._page_wow_confirm()
 
-    # ---------- Page 2b: login guide ----------
+    # ---------- Page 2a: Grok Build CLI (default, uses your subscription) ----------
+
+    def _page_grok_cli(self):
+        self._clear()
+        self._header(
+            "Connect your Grok subscription",
+            "The overlay runs xAI's official Grok Build app (the \u201cgrok\u201d "
+            "command) on this PC, signed in with your SuperGrok or X Premium+ "
+            "account -- no separate API bill.",
+        )
+        installed, _ = grok_cli_status()
+        steps = [
+            ("Click \u201cSet up Grok Build\u201d. A PowerShell window opens"
+             + ("" if installed else ", installs Grok Build with xAI's official "
+                "installer,") + " and runs \u201cgrok login\u201d."),
+            "Sign in in your browser with the account that has your subscription.",
+            "Come back here and click \u201cCheck again\u201d.",
+        ]
+        for i, text in enumerate(steps, start=1):
+            row = tk.Frame(self.content, bg=BG)
+            row.pack(fill="x", padx=32, pady=3)
+            tk.Label(row, text=f"{i}.", bg=BG, fg=ACCENT,
+                     font=("Segoe UI", 10, "bold"), width=2, anchor="w").pack(side="left")
+            tk.Label(row, text=text, bg=BG, fg=FG, font=("Segoe UI", 10),
+                     anchor="w", justify="left", wraplength=460).pack(side="left", fill="x")
+
+        open_row = tk.Frame(self.content, bg=BG)
+        open_row.pack(fill="x", padx=32, pady=(12, 4))
+        self._button(open_row, "Set up Grok Build",
+                     lambda: self._start_grok_setup(installed)).pack(side="left")
+
+        self.cli_status = tk.Label(
+            self.content, text="", bg=BG, fg=FG_DIM, font=("Segoe UI", 9),
+            anchor="w", wraplength=496, justify="left",
+        )
+        self.cli_status.pack(fill="x", padx=32, pady=(8, 0))
+
+        footer = tk.Frame(self.content, bg=BG)
+        footer.pack(side="bottom", fill="x", padx=32, pady=24)
+        self._button(footer, "Check again \u2192", self._recheck_cli).pack(side="right")
+        self._button(footer, "Use an API key instead", self._page_login,
+                     primary=False).pack(side="right", padx=(0, 8))
+
+    def _start_grok_setup(self, installed):
+        try:
+            open_grok_setup_terminal(installed)
+            self.cli_status.config(text="Finish signing in, then click Check again.", fg=FG_DIM)
+        except Exception as exc:
+            self.cli_status.config(
+                text=f"Couldn't open PowerShell ({exc}). Open it yourself and run: "
+                     f"{GROK_INSTALL_CMD}  then  grok login", fg=RED)
+
+    def _recheck_cli(self):
+        self.cli_status.config(text="Checking...", fg=FG_DIM)
+        self.root.update_idletasks()
+        installed, signed_in = grok_cli_status()
+        if installed and signed_in:
+            self.cli_status.config(text="Connected!", fg=GREEN)
+            self.root.after(500, self._page_wow_confirm)
+        elif installed:
+            self.cli_status.config(
+                text="Grok Build is installed but not signed in yet -- finish "
+                     "\u201cgrok login\u201d in the PowerShell window.", fg=RED)
+        else:
+            self.cli_status.config(
+                text="Grok Build isn't installed yet -- let the PowerShell "
+                     "window finish, then check again.", fg=RED)
+
+    # ---------- Page 2b: optional API key (pay per use) ----------
 
     def _page_login(self):
         self._clear()
         self._header(
-            "Connect your xAI (Grok) account",
-            "The overlay talks to Grok with your own xAI API key. It's saved "
+            "Optional: use an xAI API key",
+            "Only if you'd rather not use Grok Build: an API key is billed "
+            "per use by xAI, separately from any subscription. It's saved "
             "only on this PC (as the XAI_API_KEY environment variable).",
         )
 
@@ -508,7 +649,7 @@ class InstallerApp:
         footer = tk.Frame(self.content, bg=BG)
         footer.pack(side="bottom", fill="x", padx=32, pady=24)
         self._button(footer, "Verify \u2192", self._verify_token).pack(side="right")
-        self._button(footer, "Skip for now", self._page_wow_confirm, primary=False).pack(side="right", padx=(0, 8))
+        self._button(footer, "\u2190 Back", self._page_grok_cli, primary=False).pack(side="right", padx=(0, 8))
 
     def _open_console(self):
         open_xai_console()
@@ -694,8 +835,7 @@ class InstallerApp:
 def run_quiet_update() -> bool:
     """Returns True if the quiet path handled everything (caller should just
     exit); False if the full wizard needs to run instead."""
-    logged_in, _ = test_api_key()
-    if not logged_in:
+    if not grok_ready():
         return False
 
     install_dir = os.path.join(os.environ["LOCALAPPDATA"], "ClaudeWowOverlay")
