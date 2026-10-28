@@ -235,7 +235,7 @@ def ack_show_request():
 
 WINDOW_W, WINDOW_H = 460, 360
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 
 def _icon_path():
@@ -2679,6 +2679,15 @@ class GrokOverlay:
             "--rules", build_system_prompt(),
             # Web only: no file edits, shell, or subagents from a game overlay.
             "--tools", "web_search,web_fetch",
+            # Headless there is nobody to answer a permission prompt, so the
+            # CLI resolves it to "cancelled" and ends the WHOLE turn
+            # ("Grok: [error] cancelled") the moment the model tries to fetch
+            # a page. dontAsk = deny anything not explicitly allowed (and a
+            # deny goes back to the model instead of killing the turn); the
+            # two --allow rules pre-approve the only tools we expose.
+            "--permission-mode", "dontAsk",
+            "--allow", "WebFetch",
+            "--allow", "WebSearch",
             "--no-subagents",
             "--no-plan",
             "--max-turns", "12",

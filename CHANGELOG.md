@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.1
+- **Fix: every question failed with "Grok: [error] cancelled".** Grok Build
+  runs headless, so when Grok tried to search or read a web page there was
+  nobody to approve the tool and the CLI cancelled the whole answer. The
+  overlay now pre-approves only web search and web fetch
+  (`--permission-mode dontAsk --allow WebFetch --allow WebSearch`); anything
+  else is denied without ending the answer.
+
 ## v1.3.0
 - **Now powered by xAI Grok instead of Anthropic Claude.** By default the
   overlay runs xAI's official **Grok Build** app (`grok`) on your PC, signed
