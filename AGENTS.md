@@ -1,6 +1,11 @@
-# Claude WoW Overlay
+# Grok WoW Overlay (repo: claude-wow-overlay)
 
-A floating, always-on-top desktop app for asking Claude questions while
+> Agent/maintainer notes. Formerly `CLAUDE.md`; renamed in v1.3.0 when the
+> app moved from Anthropic Grok to xAI Grok. The repo, exe, folder,
+> addon and registry names still say "Grok" on purpose -- see
+> **Legacy names** below.
+
+A floating, always-on-top desktop app for asking Grok questions while
 playing **World of Warcraft: Forever**. Streams live status + answers, knows
 the player's character/location/quest log via a companion WoW addon, can
 look at screenshots, marks map locations, remembers settled facts per
@@ -12,12 +17,12 @@ appears anywhere -- see **Privacy** below).
 
 ## Architecture
 
-- `overlay.py` -- the whole app (Tkinter GUI + subprocess calls to
-  `claude.exe`). Compiled to a standalone exe via PyInstaller so end users
+- `overlay.py` -- the whole app (Tkinter GUI + streaming HTTPS calls to
+  xAI's Responses API). Compiled to a standalone exe via PyInstaller so end users
   need no Python installed.
 - `installer.py` -- a Tkinter setup wizard that bundles the compiled
   overlay exe + WoW addon files as payload, walks a non-technical user
-  through prerequisites, login, and installation. Also compiled standalone.
+  through prerequisites, API-key setup, and installation. Also compiled standalone.
   Same exe, four modes selected by argv: no flag -> the full wizard (first
   install); `--uninstall` -> `UninstallApp` (this is what the registry's
   "Apps & Features" entry points at); `--update` -> `run_quiet_update()`,
@@ -26,8 +31,8 @@ appears anywhere -- see **Privacy** below).
   falling back to the full wizard if a check actually fails; `--manage` ->
   `InstallerApp(skip_welcome=True)`, launched from the overlay's own
   Settings ("Manage WoW installs...") -- skips straight to the same
-  prerequisite-check page the normal flow uses (Claude's obviously already
-  installed/logged in at that point) so a player can add a WoW flavor they
+  prerequisite-check page the normal flow uses (the API key's obviously
+  already set up at that point) so a player can add a WoW flavor they
   skipped the first time without a fresh download.
 - `payload/` -- what `installer.py` bundles: the compiled
   `ClaudeWowOverlay.exe` (gitignored, rebuilt every release), `icon.ico`,
@@ -56,36 +61,89 @@ can share a folder name (`_classic_beta_`) with an unrelated beta and its
 own `WOW_PROJECT_ID` is indistinguishable from Retail's (confirmed directly:
 both report `1`) -- falling through to `WOW_PROJECT_ID`/the official
 `WOW_PROJECT_*` constants only for everything else. This `gameVersion` field
-is surfaced to Claude in both the per-turn context (`format_wow_context`)
+is surfaced to Grok in both the per-turn context (`format_wow_context`)
 and, read once at session-creation time, the system prompt's search-source
 tier list (`build_system_prompt` picks Forever's hand-researched tier list
-vs. a generic one) -- without it, Claude could confidently answer a Retail
+vs. a generic one) -- without it, Grok could confidently answer a Retail
 question off stale Classic data with no way to notice the mismatch.
 
 ## The core loop
 
-Every question shells out to the **local `claude.exe` CLI** (the same one
-bundled with the Claude desktop app) via `-p`/`--print` headless mode, using
-the user's own OAuth login -- this is *why* nothing ever routes through
-anyone else. Model is fixed to Sonnet (Opus/Fable were removed from Settings
-in v1.1.1 -- felt like it invited picking a pricier option by accident);
-effort is user-configurable (Low/Medium/High, Medium recommended) via the
-gear icon. `--restricted --allowedTools WebSearch,Read` (Read only added
-when a screenshot's involved, plus `--add-dir` to the screenshots folder),
-streamed via `--output-format stream-json --include-partial-messages`.
+**Default backend: the official Grok Build CLI** (`grok.exe`, xAI's terminal
+agent -- https://docs.x.ai/build/overview, docs in
+https://github.com/xai-org/grok-build under
+`crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md`). Same
+pattern as the Claude era's `claude.exe -p --output-format stream-json`: the
+user signs in once with `grok login` (browser OAuth with their SuperGrok /
+X Premium+ subscription, handled entirely by the CLI), and
+`_run_grok_cli()` runs it headlessly per question:
 
-The conversation (`session_id`, passed as `--session-id`/`--resume`) and the
-visible transcript persist across app restarts as of v1.2.0 -- `session_id`
-lives in `settings.json`, the rendered text in
-`%LOCALAPPDATA%\ClaudeWowOverlay\last_conversation.txt`, both cleared
-together by "New". Before v1.2.0 every restart silently started a fresh
-claude.exe session with no memory of anything asked before -- never a
-deliberate choice, just something nobody had persisted.
+    grok --prompt-file <ClaudeWowOverlay\grok_prompt.json>
+         --output-format streaming-messages-json --include-partial-messages
+         --effort <low|medium|high> --rules <system prompt>
+         --tools web_search,web_fetch --no-subagents --no-plan
+         --max-turns 12 --no-auto-update --cwd <ClaudeWowOverlay dir>
+         (-s <new uuid> | --resume <uuid>)
+
+- `streaming-messages-json` is the Messages-API `stream-json` shape, so the
+  parser is the old claude.exe one: `stream_event` `content_block_start`
+  (thinking / tool_use / `server_tool_use` -> status line) and
+  `content_block_delta` `text_delta` -> streamed text; terminal `result`
+  (`is_error`, `result`, and `errors[]` on failure).
+- The prompt always goes via `--prompt-file` as ACP content blocks
+  (`[{"type":"text",...},{"type":"image","data":<b64>,"mimeType":"image/png"}]`)
+  -- keeps a base64 screenshot clear of Windows' ~32K command-line limit.
+- `XAI_API_KEY` is **stripped from the child env** so the CLI always bills
+  the subscription sign-in, never a stray API key.
+- The installer and `grok_cli_signed_in()` detect sign-in via `grok models`
+  ("You are not authenticated." when signed out). Never read `~/.grok/auth.json`.
+- Found at `%USERPROFILE%\.grok\bin\grok.exe` (install.ps1's default),
+  `GROK_BIN_DIR`, or PATH (`find_grok_exe()`).
+- `settings["backend"]`: `auto` (CLI if installed, else API key), `cli`,
+  `api`. `session_backend` (`cli`/`xai`) records which kind of id
+  `session_id` is; switching backend starts a fresh conversation.
+
+**Optional fallback: xAI Responses API with `XAI_API_KEY`** (pay per use)
+via `_run_grok()` -- direct HTTPS (`POST https://api.x.ai/v1/responses`),
+stdlib `urllib`, nothing to bundle. The installer can save the key with
+`setx`; `get_xai_api_key()` also reads `HKCU\Environment` directly because
+`setx` doesn't update already-running processes.
+
+Don't build our own "sign in with Grok" OAuth: xAI has no public
+third-party OAuth client registration. Tools that do it (e.g. Hermes
+Agent's `xai-oauth`) reuse xAI's own client against accounts.x.ai/auth.x.ai,
+and xAI has 403'd some subscribers on that path. Driving the official CLI
+is the supported way to use a subscription.
+
+API-fallback details --
+Request shape: `model` = `XAI_DEFAULT_MODEL` (`grok-4.7`, fixed, not
+user-selectable), `reasoning.effort` = the Settings effort
+(Low/Medium/High), `tools: [{"type": "web_search"}]` (server-side search,
+the equivalent of the old `WebSearch` tool), `stream: true`, `store: true`.
+Screenshots are sent inline as an `input_image` data URL (PNG, base64) --
+no file-reading tool or sandbox involved any more. The SSE stream is parsed
+by `_iter_sse_events()`: `response.output_text.delta` -> streamed answer,
+`response.web_search_call.*` / `output_item.added` with a `*_call` item ->
+status line (`TOOL_STATUS_LABELS`), `response.completed` -> final response
+(its `id` becomes the conversation handle), `response.failed`/`error` ->
+error. Stop works by closing the HTTP response (`_StreamHandle.terminate()`,
+kept under the old `_current_proc` attribute name).
+
+The conversation persists via `previous_response_id`: the last response id
+is stored as `session_id` in `settings.json` (same key as the old claude.exe
+session UUID; `session_backend: "xai"` marks it, and `load_settings()` drops
+a pre-1.3.0 Grok session id once). The system prompt is only sent as a
+`system` message on the turn that starts a conversation; later turns send
+only the new user message. If a stored id has expired/been deleted (HTTP
+400/404), `_run_grok` silently starts a fresh conversation once. The visible
+transcript lives in `%LOCALAPPDATA%\ClaudeWowOverlay\last_conversation.txt`;
+"New" clears both.
 
 Two hidden tags the model can emit at the end of an answer, stripped from
 the visible text and turned into UI:
 - `[MAPLOC zone="..." x=.. y=..]` -> a "Copy location" button
-  (`/claudemark <zone> <x> <y>` for the addon's native-waypoint command)
+  (`/grokmark <zone> <x> <y>` for the addon's native-waypoint command;
+  `/claudemark` is kept as a legacy alias)
 - `[SAVENOTE category="..."]...[/SAVENOTE]` -> persists to
   `%LOCALAPPDATA%\ClaudeWowOverlay\character_notes\<realm>_<char>.json`,
   re-injected into every future turn for that character until it looks
@@ -94,30 +152,20 @@ the visible text and turned into UI:
 
 ## Hard-won gotchas -- do not relearn these the hard way again
 
-1. **The Claude desktop app is MSIX-packaged.**
-   `%APPDATA%\Roaming\Claude\claude-code\<ver>\claude.exe` is a *virtualized*
-   path only visible from inside the app's own container -- a normal
-   external process can't see it, even though `Get-Process` reports that
-   exact path for the running process (it just echoes the target's own
-   view, it doesn't resolve virtualization for the caller). The real,
-   externally-reachable copy is at
-   `%LOCALAPPDATA%\Packages\*Claude*\LocalCache\Roaming\Claude\claude-code\<ver>\claude.exe`.
-   `find_claude_exe()` searches both, preferring the real one.
+1. *(Claude-era, historical)* The Claude desktop app's bundled
+   `claude.exe` lived under an MSIX-virtualized path. Irrelevant since
+   v1.3.0 -- there's no CLI to find any more.
 
-2. **`--append-system-prompt` only takes effect on the turn that CREATES a
-   session (`--session-id`).** Every later `--resume` turn silently ignores
-   a new value -- frozen at whatever was true on message 1 for that
-   session's whole lifetime (confirmed directly with an APPLE/BANANA test).
-   This is why WoW context, saved notes, and today's date live in the
-   per-turn **prompt text** (`build_turn_context()`), not the system prompt
-   -- only genuinely session-lifetime-stable instructions belong in
-   `build_system_prompt()`.
+2. **The system prompt is frozen for a conversation's lifetime.** It's
+   only sent on the first turn; later turns chain via
+   `previous_response_id`. So WoW context, saved notes, and today's date
+   live in the per-turn **prompt text** (`build_turn_context()`), not the
+   system prompt -- only genuinely conversation-lifetime-stable
+   instructions belong in `build_system_prompt()`. (Same rule as with
+   claude.exe's `--append-system-prompt`, which had the same behaviour.)
 
-3. **The `Read` tool is sandboxed to the process's working directory by
-   default**, even under `--allowedTools Read`. Screenshots live under
-   `%LOCALAPPDATA%\ClaudeWowOverlay\screenshots\`, outside that tree --
-   needs `--add-dir <screenshots dir>` explicitly, or Read refuses with
-   "outside allowed directory."
+3. *(Claude-era, historical)* claude.exe's `Read` tool needed `--add-dir`
+   for the screenshots folder. Screenshots are now sent inline as images.
 
 4. **WoW Forever's Lua only has `C_QuestLog`/`C_Map`, no legacy quest-log
    globals at all** (confirmed via QuestMaster's own compatibility layer --
@@ -148,7 +196,7 @@ the visible text and turned into UI:
 
 8. **Subprocess/`Start-Process` calls made through this session's own Bash
    or PowerShell tool don't automatically inherit registry-persisted env
-   vars** (like `CLAUDE_CODE_OAUTH_TOKEN` set via `setx`). Always explicitly
+   vars** (like `XAI_API_KEY` set via `setx`). Always explicitly
    re-fetch (`(Get-ItemProperty -Path "HKCU:\Environment" -Name X).X`) and
    `$env:X = ...` in the *same* command before launching anything that
    needs it. Bitten by this more than once, including one where it silently
@@ -203,7 +251,7 @@ the visible text and turned into UI:
     Python process won't exit naturally while it's alive -- harmless in the
     real app since `quit()` calls `os._exit(0)` (a hard kill that doesn't wait
     for thread joins), but it means any throwaway test script that
-    instantiates `ClaudeOverlay()` for real must also force-exit
+    instantiates `GrokOverlay()` for real must also force-exit
     (`os._exit(...)`) rather than falling off the end of the script, or it'll
     hang forever waiting to join that thread.
 
@@ -310,7 +358,8 @@ the visible text and turned into UI:
     give the model the per-turn context to fall back on, or in this case,
     just don't force a single choice into the frozen part at all.
 
-21. **The cached `claude.exe` path goes stale whenever the Claude desktop
+21. *(Claude-era, historical -- no CLI path any more, but the general rule
+    at the end still applies)* **The cached `claude.exe` path went stale whenever the Claude desktop
     app auto-updates.** `find_claude_exe()`'s result embeds the CLI's
     version (`...\claude-code\2.1.281\claude.exe`) and the desktop app rolls
     that forward and deletes old version folders on its own -- confirmed
@@ -350,7 +399,7 @@ the visible text and turned into UI:
     box rather than silent nothing. **Fails open**: if the mechanism itself
     errors, launch normally -- a duplicate beats an app that won't start.
     `Local\` names scope it per Windows session. The guard is called from
-    `__main__` ONLY, never `ClaudeOverlay.__init__`, so test scripts can
+    `__main__` ONLY, never `GrokOverlay.__init__`, so test scripts can
     build instances while the real app is running (the polling hook in
     `__init__` is gated on `_instance_lock` being populated for the same
     reason). Real-kernel-object, real-second-process tests (with uniquely
@@ -362,12 +411,14 @@ the visible text and turned into UI:
   to actually *execute* addon code against a stubbed WoW API, rather than
   just reading the source by eye. Caught real bugs a pure review missed
   (the `\0` pattern crash, the `PLAYER_LOGIN`-not-`/reload` gap).
-- **Python backend logic**: call `ClaudeOverlay._run_claude` (or whichever
+- **Python backend logic**: call `GrokOverlay._run_grok` (or whichever
   method) directly against a minimal `Stub` object exposing just the
-  attributes it needs (`claude_exe`, `session_id`, `ui_queue`), rather than
+  attributes it needs (`settings`, `session_id`, `ui_queue`,
+  `_stopped_by_user`, `_current_proc`), with `XAI_RESPONSES_URL` pointed at a
+  tiny local SSE server, rather than
   driving the full GUI. Faster, and caught real bugs (the `--add-dir` fix)
   without needing computer-use/screenshots.
-- **Layout/UI**: instantiate `ClaudeOverlay()` for real, `.show()`,
+- **Layout/UI**: instantiate `GrokOverlay()` for real, `.show()`,
   `.update_idletasks()`/`.update()`, then inspect `winfo_y()` /
   `winfo_height()` / `winfo_ismapped()` on the actual widgets. This is how
   the `pack()`-vs-`grid()` layout bug was caught and confirmed fixed.
@@ -384,7 +435,8 @@ the visible text and turned into UI:
    `Copy-Item` (see gotcha #9 -- not a Python/Bash copy).
 4. Rebuild `ClaudeWowOverlaySetup.exe` with the refreshed payload.
 5. `git add -A && git commit` (repo-local identity is the generic
-   `Claude WoW Overlay <noreply@users.noreply.github.com>`, never the real
+   `Claude WoW Overlay <noreply@users.noreply.github.com>` (kept as-is for
+   history continuity), never the real
    account -- see Privacy) `&& git tag vX.Y.Z && git push origin main vX.Y.Z`.
 6. `gh release create vX.Y.Z dist/ClaudeWowOverlaySetup.exe --title vX.Y.Z --notes "..."`.
 7. **Do NOT deploy the new exe to the dev machine's live install.** Leave
@@ -409,12 +461,24 @@ notes, code comments, etc.
 
 ## Known limitations / open items
 
-- **Grok/xAI integration**: asked about once, investigated lightly. The
-  user has a "Grok Bot" desktop app, but it looks like a standard Electron
-  chat client with no equivalent CLI+OAuth mechanism the way Claude Code
-  has. Not built. If asked again: either confirm a genuine xAI CLI+OAuth
-  equivalent exists, or it's a bigger fork into API-key-based auth (a real,
-  different design decision, not a small addition).
+- **Grok port (v1.3.0)**: built and syntax/unit-tested off-Windows
+  against a fake `grok` emitting the documented streaming-messages-json and
+  a mocked xAI SSE stream; the real grok 1.0.70 binary accepted the exact
+  flag set (stopped at "Not signed in"). Still needs a real signed-in run on
+  Windows (installer Grok Build page, streaming, web search, screenshot as
+  an image block, Stop, resume after restart, in-game `/grokmark`).
+
+## Legacy names
+
+Deliberately NOT renamed in the Grok port, because renaming would break
+existing installs or the updater: the GitHub repo (`claude-wow-overlay`,
+also `UPDATE_REPO`), `ClaudeWowOverlay.exe` / `ClaudeWowOverlaySetup.exe`
+(the updater looks for that release asset name), the
+`%LOCALAPPDATA%\ClaudeWowOverlay\` folder, the registry uninstall key, the
+single-instance mutex names, and the `ClaudeContext` addon folder +
+`ClaudeContextDB` SavedVariable (renaming would orphan every character's
+saved data). User-facing text says Grok everywhere.
+
 - **Multi-flavor support (Retail/Classic/Classic Era) shipped in v1.2.x
   but is still only partially verified** -- there's no Retail or Classic
   client on this machine to test against directly, unlike Forever which has

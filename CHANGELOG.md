@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.3.1
+- **Fix: every question failed with "Grok: [error] cancelled".** Grok Build
+  runs headless, so when Grok tried to search or read a web page there was
+  nobody to approve the tool and the CLI cancelled the whole answer. The
+  overlay now pre-approves only web search and web fetch
+  (`--permission-mode dontAsk --allow WebFetch --allow WebSearch`); anything
+  else is denied without ending the answer.
+
+## v1.3.0
+- **Now powered by xAI Grok instead of Anthropic Claude.** By default the
+  overlay runs xAI's official **Grok Build** app (`grok`) on your PC, signed
+  in with your **SuperGrok or X Premium+ subscription** -- the same pattern
+  the Claude version used with the Claude app, so there's no separate API
+  bill. Same features as before: streamed answers with live status, web
+  search, screenshot questions, map-location button, per-character notes,
+  Low/Medium/High effort, and conversations that survive a restart.
+- The setup wizard checks Grok Build is installed and signed in, and if not
+  opens PowerShell to run xAI's official installer and `grok login`.
+- Optional fallback: an xAI API key (`XAI_API_KEY`, pay-as-you-go, billed
+  separately) is used only when Grok Build isn't installed, or when
+  `"backend": "api"` is set in settings.json.
+- Updating from v1.2.x: the wizard will ask you to set up Grok Build once,
+  and your conversation starts fresh (old Claude conversations can't be
+  carried over). Saved per-character notes and your WoW addon data are kept.
+- In-game commands are now `/groksync` and `/grokmark`; the old
+  `/claudesync` and `/claudemark` still work.
+- Internal file/folder names (`ClaudeWowOverlay`, the `ClaudeContext`
+  addon) are unchanged so existing installs and saved data keep working.
+
 ## v1.2.8
 - Only one copy of the app can run at a time. Launching it again while it's
   already running now brings the existing window forward instead of starting

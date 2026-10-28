@@ -1,12 +1,16 @@
 r"""
-Claude WoW Overlay -- guided setup.
+Grok WoW Overlay -- guided setup.
 
 A normal (non-frameless) Tkinter wizard, styled to match the overlay app's
 own dark/purple look. Walks a completely non-technical user through:
-  1. Confirming the Claude desktop app is installed (hard prerequisite --
-     this app calls its bundled CLI directly, using the user's own login,
-     which is also *why* nothing the user asks ever passes through us).
-  2. Getting them logged in (claude setup-token), if not already.
+  1. Checking that xAI's official Grok Build CLI (grok.exe) is installed
+     and signed in with the user's SuperGrok / X Premium+ subscription --
+     the overlay runs it locally, like the Claude version ran claude.exe,
+     so nothing the user asks ever passes through us and there's no
+     separate API bill.
+  2. If not, offering to install it (xAI's own install.ps1) and run
+     `grok login` in a PowerShell window -- or, optionally, to use a
+     pay-per-use xAI API key instead (saved with setx XAI_API_KEY).
   3. Finding their WoW install(s) -- WoW Forever, Retail, Classic, Classic
      Era, whichever are present -- and letting them pick which to set the
      addon up in (or point at one manually).
@@ -29,6 +33,9 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import urllib.error
+import urllib.request
+import webbrowser
 import winreg
 from tkinter import filedialog
 
@@ -48,7 +55,7 @@ WINDOW_W, WINDOW_H = 560, 460
 
 # Bump alongside overlay.py's APP_VERSION -- shown in Windows' "Apps &
 # Features" listing via the registry uninstall entry (see register_uninstaller).
-INSTALLER_VERSION = "1.2.8"
+INSTALLER_VERSION = "1.3.1"
 
 UNINSTALL_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWowOverlay"
 
@@ -62,57 +69,54 @@ def resource_path(*parts):
 
 # ============================================================================
 # Prerequisite detection (mirrors overlay.py's own logic, since this installer
-# needs to answer the same "where's claude.exe" question before anything else
+# needs to answer the same "is there a working API key" question before anything else
 # can happen)
 # ============================================================================
 
-def find_claude_exe():
-    localappdata = os.environ.get("LOCALAPPDATA", "")
-    appdata = os.environ.get("APPDATA", "")
-    patterns = [
-        os.path.join(localappdata, "Packages", "*Claude*", "LocalCache",
-                     "Roaming", "Claude", "claude-code", "*", "claude.exe"),
-        os.path.join(appdata, "Claude", "claude-code", "*", "claude.exe"),
-    ]
-    candidates = []
-    for pattern in patterns:
-        candidates.extend(glob.glob(pattern))
-    if not candidates:
+XAI_MODELS_URL = "https://api.x.ai/v1/models"
+
+
+def get_saved_api_key():
+    """XAI_API_KEY from this process's environment, or (since `setx` only
+    affects processes started later) straight from the user's registry
+    environment."""
+    key = os.environ.get("XAI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as reg:
+            value, _ = winreg.QueryValueEx(reg, "XAI_API_KEY")
+            return (value or "").strip() or None
+    except Exception:
         return None
 
-    def version_key(path):
-        version = os.path.basename(os.path.dirname(path))
-        parts = []
-        for chunk in version.split("."):
-            try:
-                parts.append(int(chunk))
-            except ValueError:
-                parts.append(0)
-        return tuple(parts)
 
-    candidates.sort(key=version_key, reverse=True)
-    return candidates[0]
-
-
-def test_login(claude_exe, token=None):
-    """Returns (ok, message). If token is given, tests THAT token specifically
-    (used right after the user pastes one in) rather than whatever's already
-    in the environment."""
-    env = dict(os.environ)
-    if token:
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+def test_api_key(api_key=None):
+    """Returns (ok, message). Checks the given key (or the saved one) with a
+    cheap authenticated GET /v1/models -- no tokens are spent."""
+    api_key = api_key or get_saved_api_key()
+    if not api_key:
+        return False, "no API key saved yet"
+    req = urllib.request.Request(
+        XAI_MODELS_URL,
+        headers={"Authorization": f"Bearer {api_key}", "User-Agent": "GrokWowOverlaySetup"},
+    )
     try:
-        result = subprocess.run(
-            [claude_exe, "-p", "Reply with exactly: OK", "--restricted",
-             "--output-format", "text"],
-            capture_output=True, text=True, timeout=30, env=env,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status == 200:
+                return True, "OK"
+            return False, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as exc:
+        # xAI answers a bad key with HTTP 400 {"error": "Incorrect API key..."}
+        try:
+            detail = json.loads(exc.read().decode("utf-8", "replace")).get("error")
+        except Exception:
+            detail = None
+        if exc.code in (401, 403) or (detail and "api key" in str(detail).lower()):
+            return False, "xAI rejected this key"
+        return False, f"HTTP {exc.code}" + (f": {detail}" if detail else "")
     except Exception as exc:
         return False, str(exc)
-    if result.returncode == 0 and "OK" in (result.stdout or ""):
-        return True, "OK"
-    return False, (result.stderr or result.stdout or "unknown error").strip()
 
 
 # Blizzard's launcher names each flavor's own build folder consistently, but
@@ -128,6 +132,75 @@ _FLAVOR_FOLDER_LABELS = {
     "_classic_": "Classic",
 }
 _FLAVOR_PRIORITY = {"WoW Forever": 0, "Retail": 1, "Classic": 2, "Classic Era": 3}
+
+
+GROK_INSTALL_CMD = "irm https://x.ai/cli/install.ps1 | iex"
+
+
+def find_grok_exe():
+    """Same lookup as overlay.find_grok_exe (kept in sync by hand)."""
+    candidates = []
+    if os.environ.get("GROK_BIN_DIR"):
+        candidates.append(os.path.join(os.environ["GROK_BIN_DIR"], "grok.exe"))
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    candidates.append(os.path.join(home, ".grok", "bin", "grok.exe"))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return shutil.which("grok")
+
+
+def grok_cli_status():
+    """(installed, signed_in). Runs the CLI's own `grok models`, which
+    prints "You are not authenticated." without a sign-in. Never reads the
+    CLI's credential files."""
+    exe = find_grok_exe()
+    if not exe:
+        return False, False
+    env = dict(os.environ)
+    env.pop("XAI_API_KEY", None)  # judge the subscription sign-in alone
+    try:
+        out = subprocess.run(
+            [exe, "models"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, env=env, stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return True, False
+    text = ((out.stdout or "") + (out.stderr or "")).lower()
+    if "not authenticated" in text or "not signed in" in text:
+        return True, False
+    return True, out.returncode == 0
+
+
+def open_grok_setup_terminal(installed):
+    """Opens a visible PowerShell window running xAI's official installer
+    (if needed) and then `grok login`, which opens the browser sign-in."""
+    grok = find_grok_exe() or "grok"
+    if installed:
+        script = f"& '{grok}' login"
+    else:
+        script = (
+            f"{GROK_INSTALL_CMD}; "
+            "& \"$env:USERPROFILE\\.grok\\bin\\grok.exe\" login"
+        )
+    script += "; Write-Host ''; Write-Host 'Done -- you can close this window and go back to the setup.'"
+    subprocess.Popen(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit",
+         "-Command", script],
+        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+    )
+
+
+def grok_ready():
+    """True if the overlay has a working backend: the signed-in CLI
+    (default) or, as a fallback, a valid XAI_API_KEY."""
+    installed, signed_in = grok_cli_status()
+    if installed and signed_in:
+        return True
+    if get_saved_api_key():
+        return test_api_key()[0]
+    return False
 
 
 def find_wow_installs():
@@ -175,8 +248,9 @@ def find_wow_installs():
     return found
 
 
-def set_persistent_token(token):
-    subprocess.run(["setx", "CLAUDE_CODE_OAUTH_TOKEN", token],
+def set_persistent_api_key(api_key):
+    os.environ["XAI_API_KEY"] = api_key
+    subprocess.run(["setx", "XAI_API_KEY", api_key],
                     capture_output=True, text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW)
 
@@ -199,9 +273,9 @@ def register_uninstaller(install_dir, uninstall_string, icon_dst):
         size_kb = 0
 
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_REG_KEY) as key:
-        winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Claude WoW Overlay")
+        winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Grok WoW Overlay")
         winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, INSTALLER_VERSION)
-        winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Claude WoW Overlay")
+        winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Grok WoW Overlay")
         winreg.SetValueEx(key, "DisplayIcon", 0, winreg.REG_SZ, icon_dst)
         winreg.SetValueEx(key, "UninstallString", 0, winreg.REG_SZ, uninstall_string)
         winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, install_dir)
@@ -273,7 +347,7 @@ def install_everything(addons_paths, progress_cb):
         progress_cb("Creating Start Menu shortcut...")
         shortcut_path = os.path.join(
             os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu",
-            "Programs", "Claude WoW Overlay.lnk",
+            "Programs", "Grok WoW Overlay.lnk",
         )
         ps_script = f'''
 $shell = New-Object -ComObject WScript.Shell
@@ -281,7 +355,7 @@ $shortcut = $shell.CreateShortcut("{shortcut_path}")
 $shortcut.TargetPath = "{overlay_dst}"
 $shortcut.WorkingDirectory = "{install_dir}"
 $shortcut.IconLocation = "{icon_dst}"
-$shortcut.Description = "Floating Claude Q&A box for WoW -- Ctrl+Shift+Space to show/hide"
+$shortcut.Description = "Floating Grok Q&A box for WoW -- Ctrl+Shift+Space to show/hide"
 $shortcut.Save()
 '''
         subprocess.run(
@@ -295,16 +369,9 @@ $shortcut.Save()
         return False, str(exc)
 
 
-def launch_setup_token_terminal(claude_exe):
-    """Opens a real, visible console window running `claude setup-token`, so
-    the user can complete the browser approval and see/copy the printed
-    token. This has to be a real terminal -- setup-token draws its own UI
-    and produces no output at all when piped (confirmed the hard way while
-    building the overlay itself)."""
-    subprocess.Popen(
-        ["cmd", "/c", "start", "Claude Setup", "cmd", "/k", claude_exe, "setup-token"],
-        creationflags=subprocess.CREATE_NEW_CONSOLE,
-    )
+def open_xai_console():
+    """Opens the xAI console's API Keys page in the user's browser."""
+    webbrowser.open("https://console.x.ai")
 
 
 # ============================================================================
@@ -314,7 +381,7 @@ def launch_setup_token_terminal(claude_exe):
 class InstallerApp:
     def __init__(self, skip_welcome=False):
         self.root = tk.Tk()
-        self.root.title("Claude WoW Overlay Setup")
+        self.root.title("Grok WoW Overlay Setup")
         self.root.configure(bg=BG)
         self.root.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.root.resizable(False, False)
@@ -328,7 +395,6 @@ class InstallerApp:
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         self.root.geometry(f"+{(sw - WINDOW_W) // 2}+{(sh - WINDOW_H) // 3}")
 
-        self.claude_exe = None
         self.selected_addons_paths = []
         self.wow_installs = []
 
@@ -337,7 +403,7 @@ class InstallerApp:
 
         if skip_welcome:
             # Launched from the overlay's own Settings dialog ("Manage WoW
-            # installs...") on an already-installed machine -- Claude is
+            # installs...") on an already-installed machine -- Grok is
             # obviously already installed/logged in at that point, so jump
             # straight to the same prerequisite-check page the normal flow
             # uses (its own animated checks still run, just without making
@@ -375,9 +441,9 @@ class InstallerApp:
         box = tk.Frame(parent, bg=BG_DARK)
         box.pack(fill="x", padx=32, pady=(0, 16))
         tk.Label(
-            box, text="\U0001F512  Your questions go straight to YOUR OWN Claude "
+            box, text="\U0001F512  Your questions go straight to YOUR OWN Grok "
             "account. Nothing passes through us -- we never see what you ask "
-            "or what Claude replies.",
+            "or what Grok replies.",
             bg=BG_DARK, fg=FG, font=("Segoe UI", 9), justify="left",
             wraplength=470, padx=14, pady=12,
         ).pack(fill="x")
@@ -387,7 +453,7 @@ class InstallerApp:
     def _page_welcome(self):
         self._clear()
         self._header(
-            "Claude WoW Overlay",
+            "Grok WoW Overlay",
             "A floating AI assistant for World of Warcraft -- works with "
             "WoW Forever, Retail, Classic, and Classic Era. Press "
             "Ctrl+Shift+Space anytime to ask it about quests, zones, "
@@ -400,7 +466,7 @@ class InstallerApp:
         steps.pack(fill="x", padx=32, pady=(0, 16))
         for i, text in enumerate([
             "Check that everything needed is installed",
-            "Connect your Claude account (one-time, in your browser)",
+            "Sign in to Grok Build with your SuperGrok / X Premium+ account",
             "Install the app and the WoW addon",
         ], start=1):
             row = tk.Frame(steps, bg=BG)
@@ -428,8 +494,7 @@ class InstallerApp:
         checks_frame = tk.Frame(self.content, bg=BG)
         checks_frame.pack(fill="x", padx=32, pady=8)
         for key, label in [
-            ("claude", "Claude desktop app"),
-            ("login", "Signed in to Claude"),
+            ("login", "Grok Build signed in (or an xAI API key)"),
             ("wow", "World of Warcraft"),
         ]:
             row = tk.Frame(checks_frame, bg=BG)
@@ -455,12 +520,7 @@ class InstallerApp:
         self.root.after(0, lambda: self.check_rows[key].config(text=symbol, fg=color))
 
     def _run_checks(self):
-        self.claude_exe = find_claude_exe()
-        self._set_check("claude", self.claude_exe is not None)
-
-        logged_in = False
-        if self.claude_exe:
-            logged_in, _ = test_login(self.claude_exe)
+        logged_in = grok_ready()
         self._set_check("login", logged_in)
 
         self.wow_installs = find_wow_installs()
@@ -469,50 +529,95 @@ class InstallerApp:
         self.root.after(600, lambda: self._checks_done(logged_in))
 
     def _checks_done(self, logged_in):
-        if not self.claude_exe:
-            self._page_need_claude_app()
-        elif not logged_in:
-            self._page_login()
+        if not logged_in:
+            self._page_grok_cli()
         else:
             self._page_wow_confirm()
 
-    # ---------- Page 2a: missing Claude app ----------
+    # ---------- Page 2a: Grok Build CLI (default, uses your subscription) ----------
 
-    def _page_need_claude_app(self):
+    def _page_grok_cli(self):
         self._clear()
         self._header(
-            "Claude desktop app not found",
-            "This overlay needs the official Claude desktop app installed "
-            "first -- it uses its bundled CLI and your existing login, which "
-            "is also what keeps your data private.",
+            "Connect your Grok subscription",
+            "The overlay runs xAI's official Grok Build app (the \u201cgrok\u201d "
+            "command) on this PC, signed in with your SuperGrok or X Premium+ "
+            "account -- no separate API bill.",
         )
-        tk.Label(
-            self.content,
-            text="Install it from claude.ai, then run this setup again.",
-            bg=BG, fg=FG, font=("Segoe UI", 10), wraplength=496,
-            justify="left", anchor="w",
-        ).pack(fill="x", padx=32, pady=8)
+        installed, _ = grok_cli_status()
+        steps = [
+            ("Click \u201cSet up Grok Build\u201d. A PowerShell window opens"
+             + ("" if installed else ", installs Grok Build with xAI's official "
+                "installer,") + " and runs \u201cgrok login\u201d."),
+            "Sign in in your browser with the account that has your subscription.",
+            "Come back here and click \u201cCheck again\u201d.",
+        ]
+        for i, text in enumerate(steps, start=1):
+            row = tk.Frame(self.content, bg=BG)
+            row.pack(fill="x", padx=32, pady=3)
+            tk.Label(row, text=f"{i}.", bg=BG, fg=ACCENT,
+                     font=("Segoe UI", 10, "bold"), width=2, anchor="w").pack(side="left")
+            tk.Label(row, text=text, bg=BG, fg=FG, font=("Segoe UI", 10),
+                     anchor="w", justify="left", wraplength=460).pack(side="left", fill="x")
+
+        open_row = tk.Frame(self.content, bg=BG)
+        open_row.pack(fill="x", padx=32, pady=(12, 4))
+        self._button(open_row, "Set up Grok Build",
+                     lambda: self._start_grok_setup(installed)).pack(side="left")
+
+        self.cli_status = tk.Label(
+            self.content, text="", bg=BG, fg=FG_DIM, font=("Segoe UI", 9),
+            anchor="w", wraplength=496, justify="left",
+        )
+        self.cli_status.pack(fill="x", padx=32, pady=(8, 0))
 
         footer = tk.Frame(self.content, bg=BG)
         footer.pack(side="bottom", fill="x", padx=32, pady=24)
-        self._button(footer, "Check Again", self._page_checking).pack(side="right")
-        self._button(footer, "Close", self.root.destroy, primary=False).pack(side="right", padx=(0, 8))
+        self._button(footer, "Check again \u2192", self._recheck_cli).pack(side="right")
+        self._button(footer, "Use an API key instead", self._page_login,
+                     primary=False).pack(side="right", padx=(0, 8))
 
-    # ---------- Page 2b: login guide ----------
+    def _start_grok_setup(self, installed):
+        try:
+            open_grok_setup_terminal(installed)
+            self.cli_status.config(text="Finish signing in, then click Check again.", fg=FG_DIM)
+        except Exception as exc:
+            self.cli_status.config(
+                text=f"Couldn't open PowerShell ({exc}). Open it yourself and run: "
+                     f"{GROK_INSTALL_CMD}  then  grok login", fg=RED)
+
+    def _recheck_cli(self):
+        self.cli_status.config(text="Checking...", fg=FG_DIM)
+        self.root.update_idletasks()
+        installed, signed_in = grok_cli_status()
+        if installed and signed_in:
+            self.cli_status.config(text="Connected!", fg=GREEN)
+            self.root.after(500, self._page_wow_confirm)
+        elif installed:
+            self.cli_status.config(
+                text="Grok Build is installed but not signed in yet -- finish "
+                     "\u201cgrok login\u201d in the PowerShell window.", fg=RED)
+        else:
+            self.cli_status.config(
+                text="Grok Build isn't installed yet -- let the PowerShell "
+                     "window finish, then check again.", fg=RED)
+
+    # ---------- Page 2b: optional API key (pay per use) ----------
 
     def _page_login(self):
         self._clear()
         self._header(
-            "Connect your Claude account",
-            "One-time setup, done entirely in your own browser -- this app "
-            "never sees your password or session.",
+            "Optional: use an xAI API key",
+            "Only if you'd rather not use Grok Build: an API key is billed "
+            "per use by xAI, separately from any subscription. It's saved "
+            "only on this PC (as the XAI_API_KEY environment variable).",
         )
 
         steps = [
-            "Click \u201cOpen Setup\u201d below. A window will pop up.",
-            "It opens your browser -- sign in and approve.",
-            "The window prints a long code starting with sk-ant-oat01-. "
-            "Copy the whole thing.",
+            "Click \u201cOpen xAI Console\u201d and sign in or create an account.",
+            "Add some credits under Billing if your account has none.",
+            "Open \u201cAPI Keys\u201d, create a key and copy it "
+            "(it starts with xai-).",
             "Paste it in the box below and click Verify.",
         ]
         for i, text in enumerate(steps, start=1):
@@ -525,12 +630,12 @@ class InstallerApp:
 
         open_row = tk.Frame(self.content, bg=BG)
         open_row.pack(fill="x", padx=32, pady=(12, 4))
-        self._button(open_row, "Open Setup", self._open_setup_token).pack(side="left")
+        self._button(open_row, "Open xAI Console", self._open_console).pack(side="left")
 
         paste_row = tk.Frame(self.content, bg=BG)
         paste_row.pack(fill="x", padx=32, pady=(12, 4))
         self.token_entry = tk.Entry(
-            paste_row, bg=BG_FIELD, fg=FG, insertbackground=FG,
+            paste_row, bg=BG_FIELD, fg=FG, insertbackground=FG, show="\u2022",
             font=("Segoe UI", 10), bd=0,
         )
         self.token_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 8))
@@ -544,28 +649,28 @@ class InstallerApp:
         footer = tk.Frame(self.content, bg=BG)
         footer.pack(side="bottom", fill="x", padx=32, pady=24)
         self._button(footer, "Verify \u2192", self._verify_token).pack(side="right")
-        self._button(footer, "Skip for now", self._page_wow_confirm, primary=False).pack(side="right", padx=(0, 8))
+        self._button(footer, "\u2190 Back", self._page_grok_cli, primary=False).pack(side="right", padx=(0, 8))
 
-    def _open_setup_token(self):
-        launch_setup_token_terminal(self.claude_exe)
-        self.login_status.config(text="A window opened -- come back here once you've copied the code.", fg=FG_DIM)
+    def _open_console(self):
+        open_xai_console()
+        self.login_status.config(text="Your browser opened -- come back here once you've copied the key.", fg=FG_DIM)
 
     def _verify_token(self):
         token = self.token_entry.get().strip()
         if not token:
-            self.login_status.config(text="Paste the code first.", fg=RED)
+            self.login_status.config(text="Paste the key first.", fg=RED)
             return
         self.login_status.config(text="Checking...", fg=FG_DIM)
         self.root.update_idletasks()
-        ok, msg = test_login(self.claude_exe, token=token)
+        ok, msg = test_api_key(token)
         if ok:
-            set_persistent_token(token)
+            set_persistent_api_key(token)
             self.login_status.config(text="Connected!", fg=GREEN)
             self.root.after(500, self._page_wow_confirm)
         else:
             self.login_status.config(
                 text=f"That didn't work ({msg}). Double-check you copied the "
-                     "whole code and try again.",
+                     "whole key and try again.",
                 fg=RED,
             )
 
@@ -575,7 +680,7 @@ class InstallerApp:
         self._clear()
         self._header(
             "Which WoW installs should the addon go in?",
-            "Lets Claude see your character, location and quest log "
+            "Lets Grok see your character, location and quest log "
             "automatically in each one you check. The overlay app itself "
             "works fine either way -- this only affects whether it can see "
             "your live game state.",
@@ -681,7 +786,7 @@ class InstallerApp:
         tip.pack(fill="x", padx=32, pady=(0, 16))
         tk.Label(
             tip, text="To pin it to your taskbar: press the Windows key, type "
-            "\u201cClaude WoW Overlay\u201d, right-click it, and choose "
+            "\u201cGrok WoW Overlay\u201d, right-click it, and choose "
             "\u201cPin to taskbar\u201d.",
             bg=BG_DARK, fg=FG, font=("Segoe UI", 9), justify="left",
             wraplength=470, padx=14, pady=12,
@@ -717,24 +822,20 @@ class InstallerApp:
 # ============================================================================
 # Quiet update -- same exe, launched with --update by the overlay's own
 # in-app updater once it's downloaded a new setup exe. None of the wizard's
-# prerequisite questions (is Claude Desktop installed? logged in? which WoW
+# prerequisite questions (is there a working API key? which WoW
 # folder?) should have changed for an EXISTING install, so re-clicking
 # through the whole multi-page wizard for a routine update is pure friction.
 # This just re-checks those things silently and re-copies the files; the
 # overlay itself shows a brief "Updated to vX" confirmation once it relaunches
 # (see overlay.py's --updated flag). Only falls back to the full wizard if a
-# check actually fails -- e.g. the user got logged out, or Claude Desktop
-# itself is gone -- since THAT genuinely needs the guided flow again.
+# check actually fails -- e.g. the API key was revoked or removed (or this
+# is the first update from the old Claude-based version) -- since THAT genuinely needs the guided flow again.
 # ============================================================================
 
 def run_quiet_update() -> bool:
     """Returns True if the quiet path handled everything (caller should just
     exit); False if the full wizard needs to run instead."""
-    claude_exe = find_claude_exe()
-    if not claude_exe:
-        return False
-    logged_in, _ = test_login(claude_exe)
-    if not logged_in:
+    if not grok_ready():
         return False
 
     install_dir = os.path.join(os.environ["LOCALAPPDATA"], "ClaudeWowOverlay")
@@ -797,7 +898,7 @@ def do_uninstall(progress_cb, install_dir=None, shortcut_path=None):
     if shortcut_path is None:
         shortcut_path = os.path.join(
             os.environ["APPDATA"], "Microsoft", "Windows", "Start Menu",
-            "Programs", "Claude WoW Overlay.lnk",
+            "Programs", "Grok WoW Overlay.lnk",
         )
 
     progress_cb("Stopping the overlay if it's running...")
@@ -858,7 +959,7 @@ def do_uninstall(progress_cb, install_dir=None, shortcut_path=None):
 class UninstallApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Uninstall Claude WoW Overlay")
+        self.root.title("Uninstall Grok WoW Overlay")
         self.root.configure(bg=BG)
         self.root.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.root.resizable(False, False)
@@ -904,7 +1005,7 @@ class UninstallApp:
     def _page_confirm(self):
         self._clear()
         self._header(
-            "Uninstall Claude WoW Overlay?",
+            "Uninstall Grok WoW Overlay?",
             "This removes the app, the WoW addon, your Start Menu shortcut, "
             "and your saved settings/notes. This can't be undone.",
         )
@@ -931,7 +1032,7 @@ class UninstallApp:
 
     def _page_done(self):
         self._clear()
-        self._header("Uninstalled", "Claude WoW Overlay has been removed. Thanks for trying it out.")
+        self._header("Uninstalled", "Grok WoW Overlay has been removed. Thanks for trying it out.")
         footer = tk.Frame(self.content, bg=BG)
         footer.pack(side="bottom", fill="x", padx=32, pady=24)
         self._button(footer, "Close", self.root.destroy).pack(side="right")
